@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(find:*)",
+      "Bash(env)",
+      "Bash(npx @openai/codex --help)",
+      "Bash(echo:*)",
+      "Bash(timeout 5 npx:*)",
+      "Bash(npx @openai/codex login:*)",
+      "Bash(curl:*)",
+      "Bash(python3:*)",
+      "Bash(docker exec:*)",
+      "Bash(docker logs:*)",
+      "Bash(lsof:*)",
+      "Bash(netstat:*)",
+      "Bash(ss:*)",
+      "Bash(docker kill:*)",
+      "Bash(docker restart:*)"
+    ]
+  }
+}

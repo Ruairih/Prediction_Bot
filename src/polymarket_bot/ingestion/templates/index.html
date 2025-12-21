@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Polymarket Ingestion Monitor</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Roboto Mono', monospace;
+            background: #0d1117;
+            color: #c9d1d9;
+            padding: 20px;
+            line-height: 1.5;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid #30363d;
+        }
+        h1 {
+            font-size: 20px;
+            font-weight: 600;
+            color: #f0f6fc;
+        }
+        .status-badge {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .status-healthy {
+            background: #238636;
+            color: #fff;
+        }
+        .status-unhealthy {
+            background: #da3633;
+            color: #fff;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        .card {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 16px;
+        }
+        .card-title {
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            color: #8b949e;
+            margin-bottom: 12px;
+        }
+        .metric-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 6px 0;
+            border-bottom: 1px solid #21262d;
+        }
+        .metric-row:last-child {
+            border-bottom: none;
+        }
+        .metric-label {
+            color: #8b949e;
+        }
+        .metric-value {
+            font-weight: 600;
+            color: #f0f6fc;
+        }
+        .metric-value.success {
+            color: #3fb950;
+        }
+        .metric-value.warning {
+            color: #d29922;
+        }
+        .metric-value.error {
+            color: #f85149;
+        }
+        .events-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+        .events-table th {
+            text-align: left;
+            padding: 8px;
+            border-bottom: 1px solid #30363d;
+            color: #8b949e;
+            font-weight: 600;
+        }
+        .events-table td {
+            padding: 8px;
+            border-bottom: 1px solid #21262d;
+        }
+        .events-table tr:hover {
+            background: #1f2428;
+        }
+        .tag {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .tag-g1 { background: #f85149; color: #fff; }
+        .tag-g3 { background: #d29922; color: #fff; }
+        .tag-g5 { background: #a371f7; color: #fff; }
+        .tag-ok { background: #238636; color: #fff; }
+        .uptime {
+            font-size: 14px;
+            color: #8b949e;
+        }
+        #connection-status {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 8px;
+        }
+        .ws-connected { background: #3fb950; }
+        .ws-disconnected { background: #f85149; }
+        .events-container {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .refresh-indicator {
+            font-size: 11px;
+            color: #8b949e;
+            float: right;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div>
+                <h1><span id="connection-status" class="ws-disconnected"></span>POLYMARKET INGESTION</h1>
+                <span class="uptime" id="uptime">Starting...</span>
+            </div>
+            <span class="status-badge status-unhealthy" id="health-badge">LOADING</span>
+        </header>
+
+        <div class="grid">
+            <div class="card">
+                <div class="card-title">Connection</div>
+                <div class="metric-row">
+                    <span class="metric-label">WebSocket</span>
+                    <span class="metric-value" id="ws-state">-</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">Last Message</span>
+                    <span class="metric-value" id="last-msg">-</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">Reconnections</span>
+                    <span class="metric-value" id="reconnects">-</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">Subscribed Markets</span>
+                    <span class="metric-value" id="markets">-</span>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-title">Data Flow (5 min window)</div>
+                <div class="metric-row">
+                    <span class="metric-label">Total Events</span>
+                    <span class="metric-value" id="events">-</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">Event Rate</span>
+                    <span class="metric-value" id="rate">-</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">Trades Stored</span>
+                    <span class="metric-value" id="trades">-</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">Price Updates</span>
+                    <span class="metric-value" id="updates">-</span>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-title">Data Quality</div>
+                <div class="metric-row">
+                    <span class="metric-label">Avg Trade Age</span>
+                    <span class="metric-value" id="avg-age">-</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">Freshness</span>
+                    <span class="metric-value" id="freshness">-</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">Errors (1h)</span>
+                    <span class="metric-value" id="errors">-</span>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-title">Gotcha Protection</div>
+                <div class="metric-row">
+                    <span class="metric-label">G1 Stale Filtered</span>
+                    <span class="metric-value" id="g1">-</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">G3 Missing Size</span>
+                    <span class="metric-value" id="g3-missing">-</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">G3 Backfilled</span>
+                    <span class="metric-value" id="g3-backfill">-</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">G5 Divergence</span>
+                    <span class="metric-value" id="g5">-</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">
+                Recent Events
+                <span class="refresh-indicator" id="last-refresh">-</span>
+            </div>
+            <div class="events-container">
+                <table class="events-table">
+                    <thead>
+                        <tr>
+                            <th style="width: 80px;">Time</th>
+                            <th style="width: 50px;">Type</th>
+                            <th>Market</th>
+                            <th style="width: 70px;">Price</th>
+                            <th style="width: 60px;">Size</th>
+                            <th style="width: 100px;">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody id="events-body">
+                        <tr><td colspan="6" style="text-align: center; color: #8b949e;">Loading events...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let reconnectAttempts = 0;
+
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${window.location.host}/ws/live`);
+
+            ws.onopen = () => {
+                console.log('Dashboard WebSocket connected');
+                document.getElementById('connection-status').className = 'ws-connected';
+                reconnectAttempts = 0;
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                updateDashboard(data);
+            };
+
+            ws.onclose = () => {
+                console.log('Dashboard WebSocket disconnected');
+                document.getElementById('connection-status').className = 'ws-disconnected';
+                reconnectAttempts++;
+                const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+                console.log(`Reconnecting in ${delay}ms...`);
+                setTimeout(connectWebSocket, delay);
+            };
+
+            ws.onerror = (error) => {
+                console.error('Dashboard WebSocket error:', error);
+            };
+        }
+
+        function updateDashboard(data) {
+            const health = data.health || {};
+            const metrics = data.metrics || {};
+            const wsData = health.websocket || {};
+
+            // Health badge
+            const badge = document.getElementById('health-badge');
+            if (health.healthy) {
+                badge.textContent = 'HEALTHY';
+                badge.className = 'status-badge status-healthy';
+            } else {
+                badge.textContent = 'UNHEALTHY';
+                badge.className = 'status-badge status-unhealthy';
+            }
+
+            // Uptime
+            const uptime = health.uptime_seconds || 0;
+            const hours = Math.floor(uptime / 3600);
+            const mins = Math.floor((uptime % 3600) / 60);
+            const secs = Math.floor(uptime % 60);
+            document.getElementById('uptime').textContent = `Running ${hours}h ${mins}m ${secs}s`;
+
+            // Connection metrics
+            const wsState = wsData.state || '-';
+            document.getElementById('ws-state').textContent = wsState;
+            document.getElementById('ws-state').className = 'metric-value ' +
+                (wsData.connected ? 'success' : 'error');
+
+            const lastMsg = wsData.last_message_age_seconds;
+            if (lastMsg !== null && lastMsg !== undefined) {
+                document.getElementById('last-msg').textContent = `${lastMsg.toFixed(1)}s ago`;
+                document.getElementById('last-msg').className = 'metric-value ' +
+                    (lastMsg < 30 ? 'success' : lastMsg < 60 ? 'warning' : 'error');
+            } else {
+                document.getElementById('last-msg').textContent = '-';
+            }
+
+            document.getElementById('reconnects').textContent = metrics.reconnection_count || 0;
+            document.getElementById('markets').textContent = wsData.subscribed_markets || 0;
+
+            // Data flow metrics
+            document.getElementById('events').textContent = (metrics.events_received || 0).toLocaleString();
+            document.getElementById('rate').textContent = `${(metrics.events_per_second || 0).toFixed(2)}/sec`;
+            document.getElementById('trades').textContent = (metrics.trades_stored || 0).toLocaleString();
+            document.getElementById('updates').textContent = (metrics.price_updates_received || 0).toLocaleString();
+
+            // Data quality
+            const avgAge = metrics.average_trade_age_seconds || 0;
+            document.getElementById('avg-age').textContent = `${avgAge.toFixed(1)}s`;
+            document.getElementById('avg-age').className = 'metric-value ' +
+                (avgAge < 60 ? 'success' : avgAge < 180 ? 'warning' : 'error');
+
+            const freshness = metrics.freshness_percentage || 100;
+            document.getElementById('freshness').textContent = `${freshness.toFixed(1)}%`;
+            document.getElementById('freshness').className = 'metric-value ' +
+                (freshness > 95 ? 'success' : freshness > 80 ? 'warning' : 'error');
+
+            const errors = metrics.errors_last_hour || 0;
+            document.getElementById('errors').textContent = errors;
+            document.getElementById('errors').className = 'metric-value ' +
+                (errors === 0 ? 'success' : errors < 10 ? 'warning' : 'error');
+
+            // Gotcha protection metrics
+            const g1 = metrics.g1_stale_filtered || 0;
+            document.getElementById('g1').textContent = g1;
+            document.getElementById('g1').className = 'metric-value ' +
+                (g1 === 0 ? 'success' : 'warning');
+
+            document.getElementById('g3-missing').textContent = metrics.g3_missing_size || 0;
+            document.getElementById('g3-backfill').textContent = metrics.g3_size_backfilled || 0;
+
+            const g5 = metrics.g5_divergence_detected || 0;
+            document.getElementById('g5').textContent = g5;
+            document.getElementById('g5').className = 'metric-value ' +
+                (g5 === 0 ? 'success' : 'error');
+        }
+
+        async function fetchEvents() {
+            try {
+                const response = await fetch('/api/events?limit=30');
+                const data = await response.json();
+
+                const tbody = document.getElementById('events-body');
+
+                if (data.events && data.events.length > 0) {
+                    tbody.innerHTML = data.events.map(e => {
+                        const time = new Date(e.timestamp).toLocaleTimeString();
+                        // Show market question if available, otherwise truncated token ID
+                        const market = e.question || (e.token_id ? e.token_id.substring(0, 12) + '...' : '-');
+                        const marketTitle = e.question || e.token_id || '';
+                        const price = e.price ? parseFloat(e.price).toFixed(3) : '-';
+                        const size = e.size ? parseFloat(e.size).toFixed(0) : '-';
+
+                        let statusTag = '<span class="tag tag-ok">OK</span>';
+                        if (e.g1_filtered) {
+                            statusTag = '<span class="tag tag-g1">G1 STALE</span>';
+                        } else if (e.g5_flagged) {
+                            statusTag = '<span class="tag tag-g5">G5 DIVERGE</span>';
+                        } else if (e.g3_backfilled) {
+                            statusTag = '<span class="tag tag-g3">G3 BACKFILL</span>';
+                        }
+
+                        return `<tr>
+                            <td>${time}</td>
+                            <td>${e.event_type}</td>
+                            <td title="${marketTitle}" style="max-width: 500px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${market}</td>
+                            <td>${price}</td>
+                            <td>${size}</td>
+                            <td>${statusTag}</td>
+                        </tr>`;
+                    }).join('');
+                } else {
+                    tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #8b949e;">No events received yet</td></tr>';
+                }
+
+                document.getElementById('last-refresh').textContent =
+                    `Updated: ${new Date().toLocaleTimeString()}`;
+
+            } catch (error) {
+                console.error('Failed to fetch events:', error);
+            }
+        }
+
+        // Initialize dashboard
+        connectWebSocket();
+        fetchEvents();
+
+        // Refresh events every 3 seconds
+        setInterval(fetchEvents, 3000);
+    </script>
+</body>
+</html>

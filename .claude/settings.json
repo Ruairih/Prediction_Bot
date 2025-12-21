@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "codex": {
+      "command": "codex",
+      "args": ["--mcp"]
+    }
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "echo ''"
+  }
+}

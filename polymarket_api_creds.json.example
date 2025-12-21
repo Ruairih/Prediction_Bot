@@ -1,0 +1,11 @@
+{
+  "api_key": "your-api-key-here",
+  "api_secret": "your-api-secret-here",
+  "api_passphrase": "your-api-passphrase-here",
+  "private_key": "0x...",
+  "funder": "0x...",
+  "signature_type": 2,
+  "host": "https://clob.polymarket.com",
+  "chain_id": 137,
+  "generated_at": "2025-01-01T00:00:00.000000+00:00"
+}

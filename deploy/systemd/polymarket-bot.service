@@ -1,0 +1,57 @@
+# Polymarket Trading Bot - Main Service
+#
+# Installation:
+#   sudo cp polymarket-bot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable polymarket-bot
+#   sudo systemctl start polymarket-bot
+#
+# Logs:
+#   sudo journalctl -u polymarket-bot -f
+#
+# Status:
+#   sudo systemctl status polymarket-bot
+
+[Unit]
+Description=Polymarket Trading Bot
+After=network.target postgresql.service
+Wants=postgresql.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=trading
+Group=trading
+WorkingDirectory=/opt/polymarket-bot
+EnvironmentFile=/opt/polymarket-bot/.env
+
+# Main command (bot doesn't use port 5050 - that's dashboard only)
+ExecStart=/opt/polymarket-bot/.venv/bin/python -m polymarket_bot.main --mode all
+
+# Restart configuration
+Restart=always
+RestartSec=10
+
+# Graceful shutdown
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/polymarket-bot/logs
+PrivateTmp=true
+
+# Resource limits
+MemoryMax=2G
+CPUQuota=100%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=polymarket-bot
+
+[Install]
+WantedBy=multi-user.target

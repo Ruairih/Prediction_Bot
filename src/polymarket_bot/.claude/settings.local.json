@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(cat:*)",
+      "Bash(env)",
+      "Bash(readlink:*)",
+      "Bash(ls:*)",
+      "Bash(sort:*)",
+      "Bash(python3:*)"
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "Claude Code - Predict_V3",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "runArgs": [
+    "--sysctl", "net.ipv6.conf.all.disable_ipv6=1",
+    "--sysctl", "net.ipv6.conf.default.disable_ipv6=1"
+  ],
+  "postStartCommand": "echo '✅ Run: claude --dangerously-skip-permissions'",
+  "postCreateCommand": "pip install -r requirements.txt",
+  "mounts": [
+    "source=${localEnv:HOME}/.claude,target=/home/dev/.claude,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.claude.json,target=/home/dev/.claude.json,type=bind,consistency=cached"
+  ],
+  "remoteUser": "dev",
+  "containerEnv": {
+    "DATABASE_URL": "postgresql://predict:predict@postgres:5432/predict",
+    "REDIS_URL": "redis://redis:6379",
+    "NODE_OPTIONS": "--dns-result-order=ipv4first",
+    "ANTHROPIC_TIMEOUT": "120000"
+  },
+  "forwardPorts": [8000, 8080]
+}

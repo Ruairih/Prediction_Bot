@@ -1,0 +1,53 @@
+# Polymarket Monitoring Dashboard - Separate Service
+#
+# Runs as a separate process so dashboard stays up even if bot crashes
+#
+# Installation:
+#   sudo cp polymarket-dashboard.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable polymarket-dashboard
+#   sudo systemctl start polymarket-dashboard
+
+[Unit]
+Description=Polymarket Monitoring Dashboard
+After=network.target postgresql.service polymarket-bot.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=trading
+Group=trading
+WorkingDirectory=/opt/polymarket-bot
+EnvironmentFile=/opt/polymarket-bot/.env
+
+# Kill any orphaned processes on dashboard port
+ExecStartPre=-/usr/bin/fuser -k 5050/tcp
+
+# Main command
+ExecStart=/opt/polymarket-bot/.venv/bin/python -m polymarket_bot.monitoring.dashboard --host 0.0.0.0 --port 5050
+
+# Restart configuration
+Restart=always
+RestartSec=5
+
+# Graceful shutdown
+TimeoutStopSec=10
+KillSignal=SIGTERM
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+# Resource limits
+MemoryMax=512M
+CPUQuota=50%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=polymarket-dashboard
+
+[Install]
+WantedBy=multi-user.target

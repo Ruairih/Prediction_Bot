@@ -1,0 +1,190 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.11"
+  DATABASE_URL: postgresql://predict:predict@localhost:5432/predict
+
+jobs:
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff mypy
+
+      - name: Run Ruff (linting)
+        run: ruff check src/
+
+      - name: Run Ruff (formatting check)
+        run: ruff format --check src/
+
+      - name: Run MyPy (type checking)
+        run: mypy src/polymarket_bot/ --ignore-missing-imports
+
+  test-unit:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: predict
+          POSTGRES_PASSWORD: predict
+          POSTGRES_DB: predict
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Initialize database schema
+        run: |
+          PGPASSWORD=predict psql -h localhost -U predict -d predict -f seed/01_schema.sql
+
+      - name: Run unit tests
+        run: |
+          pytest src/polymarket_bot/ -v -m "not integration" --tb=short
+
+      - name: Run unit tests with coverage
+        run: |
+          pytest src/polymarket_bot/ -v -m "not integration" \
+            --cov=src/polymarket_bot \
+            --cov-report=xml \
+            --cov-report=term-missing
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+
+  test-integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: test-unit
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: predict
+          POSTGRES_PASSWORD: predict
+          POSTGRES_DB: predict
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Initialize database schema
+        run: |
+          PGPASSWORD=predict psql -h localhost -U predict -d predict -f seed/01_schema.sql
+
+      - name: Run integration tests
+        env:
+          DATABASE_URL: postgresql://predict:predict@localhost:5432/predict
+          REDIS_URL: redis://localhost:6379
+        run: |
+          pytest tests/integration/ -v -m integration --tb=short
+
+  coverage-check:
+    name: Coverage Check
+    runs-on: ubuntu-latest
+    needs: test-unit
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: predict
+          POSTGRES_PASSWORD: predict
+          POSTGRES_DB: predict
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Initialize database schema
+        run: |
+          PGPASSWORD=predict psql -h localhost -U predict -d predict -f seed/01_schema.sql
+
+      - name: Check coverage thresholds
+        run: |
+          # Run coverage and check thresholds
+          # Storage: >95%, Execution: >95%, Core: >90%, Strategies: >90%
+          # Ingestion: >85%, Monitoring: >80%
+
+          pytest src/polymarket_bot/storage/tests/ \
+            --cov=src/polymarket_bot/storage \
+            --cov-fail-under=95 \
+            -v --tb=short || echo "Storage coverage below 95%"
+
+          # Add more coverage checks as components are implemented

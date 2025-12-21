@@ -1,0 +1,594 @@
+"""
+Tests for exit strategy management.
+
+Exit strategies:
+- Short positions (<7 days): Hold to resolution (high win rate)
+- Long positions (>7 days): Apply profit target (99c) and stop-loss (90c)
+"""
+import pytest
+from datetime import datetime, timezone, timedelta
+from decimal import Decimal
+from unittest.mock import MagicMock
+
+from polymarket_bot.execution import (
+    ExitManager,
+    ExitConfig,
+    Position,
+)
+
+
+class TestExitStrategySelection:
+    """Tests for selecting appropriate exit strategy."""
+
+    def test_short_position_holds_to_resolution(
+        self, exit_manager, short_held_position
+    ):
+        """Positions < 7 days should hold to resolution."""
+        should_exit, reason = exit_manager.evaluate_exit(
+            short_held_position,
+            current_price=Decimal("0.99")  # At profit target
+        )
+
+        # Should NOT exit - short hold
+        assert should_exit is False
+
+    def test_long_position_exits_at_profit_target(
+        self, exit_manager, long_held_position
+    ):
+        """Positions > 7 days should exit at profit target."""
+        should_exit, reason = exit_manager.evaluate_exit(
+            long_held_position,
+            current_price=Decimal("0.99")  # At profit target
+        )
+
+        assert should_exit is True
+        assert reason == "profit_target"
+
+    def test_long_position_exits_at_stop_loss(
+        self, exit_manager, long_held_position
+    ):
+        """Positions > 7 days should exit at stop loss."""
+        should_exit, reason = exit_manager.evaluate_exit(
+            long_held_position,
+            current_price=Decimal("0.90")  # At stop loss
+        )
+
+        assert should_exit is True
+        assert reason == "stop_loss"
+
+    def test_long_position_holds_in_between(
+        self, exit_manager, long_held_position
+    ):
+        """Long positions should hold between target and stop."""
+        should_exit, reason = exit_manager.evaluate_exit(
+            long_held_position,
+            current_price=Decimal("0.94")  # Between 0.90 and 0.99
+        )
+
+        assert should_exit is False
+
+    def test_get_strategy_for_short_position(self, exit_manager, short_held_position):
+        """Should return hold_to_resolution for short positions."""
+        strategy = exit_manager.get_strategy_for_position(short_held_position)
+
+        assert strategy == "hold_to_resolution"
+
+    def test_get_strategy_for_long_position(self, exit_manager, long_held_position):
+        """Should return conditional_exit for long positions."""
+        strategy = exit_manager.get_strategy_for_position(long_held_position)
+
+        assert strategy == "conditional_exit"
+
+
+class TestExitExecution:
+    """Tests for executing exits."""
+
+    @pytest.mark.asyncio
+    async def test_submits_sell_order_on_exit(
+        self, exit_manager, long_held_position, mock_clob_client
+    ):
+        """Should submit SELL order when exit triggered."""
+        # Add position to tracker
+        exit_manager._position_tracker.positions[long_held_position.position_id] = long_held_position
+
+        await exit_manager.execute_exit(
+            long_held_position,
+            current_price=Decimal("0.99"),
+            reason="profit_target"
+        )
+
+        # Should have submitted sell order
+        mock_clob_client.create_order.assert_called()
+        call_kwargs = mock_clob_client.create_order.call_args[1]
+        assert call_kwargs["side"] == "SELL"
+
+    @pytest.mark.asyncio
+    async def test_closes_position_on_exit(
+        self, exit_manager, long_held_position, mock_db
+    ):
+        """Should close position when exit executed."""
+        exit_manager._position_tracker.positions[long_held_position.position_id] = long_held_position
+
+        await exit_manager.execute_exit(
+            long_held_position,
+            current_price=Decimal("0.99"),
+            reason="profit_target"
+        )
+
+        # Position should be closed
+        position = exit_manager._position_tracker.get_position(long_held_position.position_id)
+        assert position.status == "closed"
+
+    @pytest.mark.asyncio
+    async def test_returns_true_on_success(
+        self, exit_manager, long_held_position, mock_db, mock_clob_client
+    ):
+        """Should return True when exit succeeds."""
+        exit_manager._position_tracker.positions[long_held_position.position_id] = long_held_position
+
+        result = await exit_manager.execute_exit(
+            long_held_position,
+            current_price=Decimal("0.99"),
+            reason="profit_target"
+        )
+
+        assert result is True
+
+
+class TestExitBoundaries:
+    """Tests for exit strategy boundary conditions."""
+
+    @pytest.mark.parametrize("days_held,expected_strategy", [
+        (6, "hold_to_resolution"),
+        (7, "conditional_exit"),  # Exactly at threshold
+        (8, "conditional_exit"),
+        (30, "conditional_exit"),
+    ])
+    def test_hold_days_boundary(self, exit_manager, sample_position, days_held, expected_strategy):
+        """Should apply correct strategy based on hold duration."""
+        sample_position.entry_time = datetime.now(timezone.utc) - timedelta(days=days_held)
+
+        strategy = exit_manager.get_strategy_for_position(sample_position)
+
+        assert strategy == expected_strategy
+
+    @pytest.mark.parametrize("price,expected_exit", [
+        (Decimal("0.89"), True),   # Below stop loss
+        (Decimal("0.90"), True),   # At stop loss
+        (Decimal("0.91"), False),  # Above stop loss
+        (Decimal("0.98"), False),  # Below profit target
+        (Decimal("0.99"), True),   # At profit target
+        (Decimal("1.00"), True),   # Above profit target
+    ])
+    def test_price_boundaries(
+        self, exit_manager, long_held_position, price, expected_exit
+    ):
+        """Should exit at correct price boundaries."""
+        should_exit, _ = exit_manager.evaluate_exit(
+            long_held_position,
+            current_price=price
+        )
+
+        assert should_exit == expected_exit
+
+
+class TestBatchEvaluation:
+    """Tests for evaluating multiple positions."""
+
+    @pytest.mark.asyncio
+    async def test_evaluate_all_positions(self, exit_manager, long_held_position):
+        """Should evaluate all open positions."""
+        exit_manager._position_tracker.positions[long_held_position.position_id] = long_held_position
+
+        current_prices = {
+            "tok_yes_abc": Decimal("0.99"),  # At profit target
+        }
+
+        exits = await exit_manager.evaluate_all_positions(current_prices)
+
+        assert len(exits) == 1
+        assert exits[0][0].position_id == long_held_position.position_id
+        assert exits[0][1] == "profit_target"
+
+    @pytest.mark.asyncio
+    async def test_process_exits(self, exit_manager, long_held_position, mock_db, mock_clob_client):
+        """Should process all pending exits."""
+        exit_manager._position_tracker.positions[long_held_position.position_id] = long_held_position
+
+        current_prices = {
+            "tok_yes_abc": Decimal("0.99"),
+        }
+
+        count = await exit_manager.process_exits(current_prices)
+
+        assert count == 1
+
+
+class TestMarketResolution:
+    """Tests for handling market resolution."""
+
+    @pytest.mark.asyncio
+    async def test_handles_yes_resolution(self, exit_manager, sample_position, mock_db):
+        """Should handle market resolving to Yes."""
+        exit_manager._position_tracker.positions[sample_position.position_id] = sample_position
+        exit_manager._position_tracker._token_positions[sample_position.token_id] = sample_position.position_id
+
+        result = await exit_manager.handle_resolution(
+            token_id="tok_yes_abc",
+            resolved_price=Decimal("1.00"),
+        )
+
+        assert result is True
+
+        # Position should be closed
+        position = exit_manager._position_tracker.get_position(sample_position.position_id)
+        assert position.status == "closed"
+
+    @pytest.mark.asyncio
+    async def test_handles_no_resolution(self, exit_manager, sample_position, mock_db):
+        """Should handle market resolving to No."""
+        exit_manager._position_tracker.positions[sample_position.position_id] = sample_position
+        exit_manager._position_tracker._token_positions[sample_position.token_id] = sample_position.position_id
+
+        result = await exit_manager.handle_resolution(
+            token_id="tok_yes_abc",
+            resolved_price=Decimal("0.00"),
+        )
+
+        assert result is True
+
+        # Check exit event reason
+        events = exit_manager._position_tracker.get_exit_events(sample_position.position_id)
+        assert events[0].reason == "resolution_no"
+
+    @pytest.mark.asyncio
+    async def test_ignores_unknown_token(self, exit_manager):
+        """Should return False for unknown token."""
+        result = await exit_manager.handle_resolution(
+            token_id="tok_unknown",
+            resolved_price=Decimal("1.00"),
+        )
+
+        assert result is False
+
+
+class TestConfigOverrides:
+    """Tests for configuration overrides."""
+
+    def test_custom_profit_target(self, mock_db, mock_clob_client, position_tracker):
+        """Should use custom profit target."""
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+            profit_target=Decimal("0.98"),  # Custom target
+            min_hold_days=7,
+        )
+
+        position = Position(
+            position_id="pos_test",
+            token_id="tok_test",
+            condition_id="0xtest",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+
+        should_exit, reason = manager.evaluate_exit(position, Decimal("0.98"))
+
+        assert should_exit is True
+        assert reason == "profit_target"
+
+    def test_custom_stop_loss(self, mock_db, mock_clob_client, position_tracker):
+        """Should use custom stop loss."""
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+            stop_loss=Decimal("0.85"),  # Custom stop
+            min_hold_days=7,
+        )
+
+        position = Position(
+            position_id="pos_test",
+            token_id="tok_test",
+            condition_id="0xtest",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+
+        # 0.86 is above 0.85, should not exit
+        should_exit, _ = manager.evaluate_exit(position, Decimal("0.86"))
+        assert should_exit is False
+
+        # 0.85 is at stop loss, should exit
+        should_exit, reason = manager.evaluate_exit(position, Decimal("0.85"))
+        assert should_exit is True
+        assert reason == "stop_loss"
+
+
+class TestOrderFillConfirmation:
+    """
+    Tests for waiting for order fill before closing position.
+
+    FIX: Prevents desync between order state and position state.
+    Without confirmation, position could be closed while order is rejected.
+    """
+
+    @pytest.mark.asyncio
+    async def test_waits_for_order_fill_not_just_live(
+        self, mock_db, mock_clob_client, position_tracker
+    ):
+        """
+        Should wait for order to be FILLED, not just LIVE.
+
+        FIX: LIVE means order is on book but NOT filled.
+        We must wait for actual fill before closing position.
+        """
+        # Mock order status: LIVE (order is on book but NOT filled)
+        mock_clob_client.get_order.return_value = {
+            "orderID": "order_exit",
+            "status": "LIVE",
+            "filledSize": "0",
+            "size": "20",
+        }
+
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+        )
+
+        position = Position(
+            position_id="pos_wait",
+            token_id="tok_wait",
+            condition_id="0xwait",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+        position_tracker.positions[position.position_id] = position
+
+        result = await manager.execute_exit(
+            position,
+            current_price=Decimal("0.99"),
+            reason="profit_target",
+            wait_for_fill=True,
+            fill_timeout_seconds=0.5,  # Short timeout for test
+        )
+
+        # FIX: Should FAIL - LIVE means not filled yet, times out
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_live_to_matched_sequence(
+        self, mock_db, mock_clob_client, position_tracker
+    ):
+        """
+        Should succeed when order goes LIVE -> MATCHED.
+
+        This tests the polling behavior where order is initially LIVE
+        but eventually fills.
+        """
+        # Mock order status sequence: LIVE, then MATCHED
+        call_count = [0]
+
+        def get_order_side_effect(order_id):
+            call_count[0] += 1
+            if call_count[0] < 3:
+                return {
+                    "orderID": order_id,
+                    "status": "LIVE",
+                    "filledSize": "0",
+                    "size": "20",
+                }
+            return {
+                "orderID": order_id,
+                "status": "MATCHED",
+                "filledSize": "20",
+                "size": "20",
+            }
+
+        mock_clob_client.get_order.side_effect = get_order_side_effect
+
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+        )
+
+        position = Position(
+            position_id="pos_sequence",
+            token_id="tok_sequence",
+            condition_id="0xsequence",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+        position_tracker.positions[position.position_id] = position
+
+        result = await manager.execute_exit(
+            position,
+            current_price=Decimal("0.99"),
+            reason="profit_target",
+            wait_for_fill=True,
+            fill_timeout_seconds=5.0,
+        )
+
+        # Should succeed - order eventually filled
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_does_not_close_on_rejection(
+        self, mock_db, mock_clob_client, position_tracker
+    ):
+        """
+        Should NOT close position if order is rejected.
+
+        Desync prevention: position should remain open.
+        """
+        # Mock order status: REJECTED
+        mock_clob_client.get_order.return_value = {
+            "orderID": "order_rejected",
+            "status": "REJECTED",
+            "filledSize": "0",
+            "size": "20",
+        }
+
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+        )
+
+        position = Position(
+            position_id="pos_reject",
+            token_id="tok_reject",
+            condition_id="0xreject",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+        position_tracker.positions[position.position_id] = position
+
+        result = await manager.execute_exit(
+            position,
+            current_price=Decimal("0.99"),
+            reason="profit_target",
+            wait_for_fill=True,
+            fill_timeout_seconds=1.0,
+        )
+
+        # Should fail - order was rejected
+        assert result is False
+
+        # Position should NOT be closed
+        pos = position_tracker.get_position(position.position_id)
+        assert pos.status != "closed"
+
+    @pytest.mark.asyncio
+    async def test_accepts_matched_status(
+        self, mock_db, mock_clob_client, position_tracker
+    ):
+        """
+        Should accept MATCHED status as filled.
+        """
+        mock_clob_client.get_order.return_value = {
+            "orderID": "order_matched",
+            "status": "MATCHED",
+            "filledSize": "20",
+            "size": "20",
+        }
+
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+        )
+
+        position = Position(
+            position_id="pos_matched",
+            token_id="tok_matched",
+            condition_id="0xmatched",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+        position_tracker.positions[position.position_id] = position
+
+        result = await manager.execute_exit(
+            position,
+            current_price=Decimal("0.99"),
+            reason="profit_target",
+        )
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_handles_timeout(
+        self, mock_db, mock_clob_client, position_tracker
+    ):
+        """
+        Should return False on timeout.
+
+        Long polling with no terminal status should eventually timeout.
+        """
+        # Mock order stuck in PENDING state
+        mock_clob_client.get_order.return_value = {
+            "orderID": "order_stuck",
+            "status": "PENDING",
+            "filledSize": "0",
+            "size": "20",
+        }
+
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+        )
+
+        position = Position(
+            position_id="pos_timeout",
+            token_id="tok_timeout",
+            condition_id="0xtimeout",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+        position_tracker.positions[position.position_id] = position
+
+        result = await manager.execute_exit(
+            position,
+            current_price=Decimal("0.99"),
+            reason="profit_target",
+            wait_for_fill=True,
+            fill_timeout_seconds=0.5,  # Very short timeout
+        )
+
+        # Should fail due to timeout
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_refreshes_balance_after_resolution(
+        self, mock_db, mock_clob_client, position_tracker
+    ):
+        """
+        G4 FIX: Should refresh balance after resolution.
+
+        Resolution settles positions and changes balance.
+        """
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+        )
+        # Mock refresh_balance for assertion
+        manager._balance_manager.refresh_balance = MagicMock()
+
+        position = Position(
+            position_id="pos_resolve",
+            token_id="tok_resolve",
+            condition_id="0xresolve",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=1),
+        )
+        position_tracker.positions[position.position_id] = position
+        position_tracker._token_positions[position.token_id] = position.position_id
+
+        await manager.handle_resolution(
+            token_id="tok_resolve",
+            resolved_price=Decimal("1.00"),
+        )
+
+        # Balance should have been refreshed (G4 protection)
+        manager._balance_manager.refresh_balance.assert_called()

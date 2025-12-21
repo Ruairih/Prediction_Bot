@@ -1,0 +1,73 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Project specific
+data/
+*.db
+*.sqlite
+logs/
+*.log
+
+# Credentials - NEVER commit these
+credentials.json
+*.pem
+*.key
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Polymarket API credentials - CRITICAL: Contains private keys!
+polymarket_api_creds.json
+*_creds.json
+!*_creds.json.example
+
+# Wallet keys
+*.keystore
+
+# OS
+.DS_Store
+Thumbs.db
