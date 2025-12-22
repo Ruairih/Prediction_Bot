@@ -329,7 +329,7 @@ class OrderbookRepository(BaseRepository[OrderbookSnapshot]):
             SELECT * FROM orderbook_snapshots
             WHERE condition_id = $1
               AND token_id = $2
-              AND snapshot_at >= NOW() - INTERVAL '%s hours'
+              AND snapshot_at >= NOW() - make_interval(hours => $3)
             ORDER BY snapshot_at DESC
             """,
             condition_id,

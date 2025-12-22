@@ -251,15 +251,23 @@ class MarketUniverseRepository(BaseRepository[MarketUniverse]):
             params.append(q.min_interestingness)
             param_idx += 1
 
-        # Time filters (using interval arithmetic)
+        # Time filters (using parameterized intervals)
         if q.max_days_to_end is not None:
-            conditions.append(f"end_date <= NOW() + INTERVAL '{q.max_days_to_end} days'")
+            conditions.append(f"end_date <= NOW() + make_interval(days => ${param_idx})")
+            params.append(int(q.max_days_to_end))
+            param_idx += 1
         if q.min_days_to_end is not None:
-            conditions.append(f"end_date >= NOW() + INTERVAL '{q.min_days_to_end} days'")
+            conditions.append(f"end_date >= NOW() + make_interval(days => ${param_idx})")
+            params.append(int(q.min_days_to_end))
+            param_idx += 1
         if q.min_market_age_days is not None:
-            conditions.append(f"created_at <= NOW() - INTERVAL '{q.min_market_age_days} days'")
+            conditions.append(f"created_at <= NOW() - make_interval(days => ${param_idx})")
+            params.append(int(q.min_market_age_days))
+            param_idx += 1
         if q.max_market_age_days is not None:
-            conditions.append(f"created_at >= NOW() - INTERVAL '{q.max_market_age_days} days'")
+            conditions.append(f"created_at >= NOW() - make_interval(days => ${param_idx})")
+            params.append(int(q.max_market_age_days))
+            param_idx += 1
 
         # Tier filters
         if q.tier is not None:
@@ -487,8 +495,9 @@ class MarketUniverseRepository(BaseRepository[MarketUniverse]):
             price_1h = await self.get_price_at_time(condition_id, hour_ago)
             price_24h = await self.get_price_at_time(condition_id, day_ago)
 
-            change_1h = (current - price_1h) if price_1h else 0
-            change_24h = (current - price_24h) if price_24h else 0
+            # Use 'is None' check, not truthiness (0.0 is a valid price)
+            change_1h = (current - price_1h) if price_1h is not None else 0
+            change_24h = (current - price_24h) if price_24h is not None else 0
 
             changes[condition_id] = (change_1h, change_24h)
 

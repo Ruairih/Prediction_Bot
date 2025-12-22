@@ -450,7 +450,12 @@ class MarketUniverse(BaseModel):
         """Days until market resolution."""
         if self.end_date is None:
             return None
-        delta = self.end_date - datetime.utcnow()
+        # Handle both tz-aware and naive datetimes
+        now = datetime.utcnow()
+        end = self.end_date
+        if end.tzinfo is not None:
+            end = end.replace(tzinfo=None)
+        delta = end - now
         return max(0, delta.total_seconds() / 86400)
 
     @property
@@ -458,7 +463,12 @@ class MarketUniverse(BaseModel):
         """Days since market creation."""
         if self.created_at is None:
             return None
-        delta = datetime.utcnow() - self.created_at
+        # Handle both tz-aware and naive datetimes
+        now = datetime.utcnow()
+        created = self.created_at
+        if created.tzinfo is not None:
+            created = created.replace(tzinfo=None)
+        delta = now - created
         return delta.total_seconds() / 86400
 
 

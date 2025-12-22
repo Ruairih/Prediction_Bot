@@ -128,11 +128,25 @@ class TierManager:
         return stats
 
     async def _process_tier_requests(self) -> int:
-        """Process strategy tier requests."""
+        """Process strategy tier requests, respecting tier capacity."""
         requests = await self.universe_repo.get_active_tier_requests()
-        count = 0
+        tier_counts = await self.universe_repo.get_tier_counts()
 
-        for req in requests:
+        # Track how many slots available per tier
+        tier_2_available = self.limits.tier_2_max - tier_counts.get(2, 0)
+        tier_3_available = self.limits.tier_3_max - tier_counts.get(3, 0)
+
+        count = 0
+        # Sort by tier descending so Tier 3 requests are processed first
+        sorted_requests = sorted(requests, key=lambda r: -r.requested_tier)
+
+        for req in sorted_requests:
+            # Check capacity
+            if req.requested_tier == 3 and tier_3_available <= 0:
+                continue
+            if req.requested_tier == 2 and tier_2_available <= 0:
+                continue
+
             promoted = await self.universe_repo.promote(
                 req.condition_id,
                 req.requested_tier,
@@ -140,6 +154,10 @@ class TierManager:
             )
             if promoted:
                 count += 1
+                if req.requested_tier == 3:
+                    tier_3_available -= 1
+                elif req.requested_tier == 2:
+                    tier_2_available -= 1
 
         return count
 
