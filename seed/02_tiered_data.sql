@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS market_universe (
     -- Resolution status
     is_resolved BOOLEAN DEFAULT FALSE,
     resolution_outcome TEXT,
+    winning_outcome_index INTEGER,  -- 0=Yes, 1=No for binary markets
     resolved_at TIMESTAMP,
 
     -- Timestamps

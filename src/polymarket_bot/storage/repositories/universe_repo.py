@@ -88,10 +88,10 @@ class MarketUniverseRepository(BaseRepository[MarketUniverse]):
                 volume_24h, volume_total, liquidity, trade_count_24h,
                 price_change_1h, price_change_24h,
                 interestingness_score, tier, is_resolved,
-                resolution_outcome, resolved_at, snapshot_at
+                resolution_outcome, winning_outcome_index, resolved_at, snapshot_at
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, NOW()
+                $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, NOW()
             )
             ON CONFLICT (condition_id) DO UPDATE SET
                 market_id = COALESCE(EXCLUDED.market_id, market_universe.market_id),
@@ -112,9 +112,10 @@ class MarketUniverseRepository(BaseRepository[MarketUniverse]):
                 price_change_1h = EXCLUDED.price_change_1h,
                 price_change_24h = EXCLUDED.price_change_24h,
                 interestingness_score = EXCLUDED.interestingness_score,
-                is_resolved = EXCLUDED.is_resolved,
-                resolution_outcome = EXCLUDED.resolution_outcome,
-                resolved_at = EXCLUDED.resolved_at,
+                is_resolved = COALESCE(EXCLUDED.is_resolved, market_universe.is_resolved),
+                resolution_outcome = COALESCE(EXCLUDED.resolution_outcome, market_universe.resolution_outcome),
+                winning_outcome_index = COALESCE(EXCLUDED.winning_outcome_index, market_universe.winning_outcome_index),
+                resolved_at = COALESCE(EXCLUDED.resolved_at, market_universe.resolved_at),
                 snapshot_at = NOW()
             """,
             market.condition_id,
@@ -140,6 +141,7 @@ class MarketUniverseRepository(BaseRepository[MarketUniverse]):
             market.tier,
             market.is_resolved,
             market.resolution_outcome,
+            market.winning_outcome_index,
             market.resolved_at,
         )
 
@@ -159,7 +161,7 @@ class MarketUniverseRepository(BaseRepository[MarketUniverse]):
                 m.volume_24h, m.volume_total, m.liquidity, m.trade_count_24h,
                 m.price_change_1h, m.price_change_24h,
                 m.interestingness_score, m.tier, m.is_resolved,
-                m.resolution_outcome, m.resolved_at,
+                m.resolution_outcome, m.winning_outcome_index, m.resolved_at,
             ))
 
         # Use COPY or executemany for batch insert
@@ -174,10 +176,10 @@ class MarketUniverseRepository(BaseRepository[MarketUniverse]):
                     volume_24h, volume_total, liquidity, trade_count_24h,
                     price_change_1h, price_change_24h,
                     interestingness_score, tier, is_resolved,
-                    resolution_outcome, resolved_at, snapshot_at
+                    resolution_outcome, winning_outcome_index, resolved_at, snapshot_at
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                    $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, NOW()
+                    $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, NOW()
                 )
                 ON CONFLICT (condition_id) DO UPDATE SET
                     market_id = COALESCE(EXCLUDED.market_id, market_universe.market_id),
@@ -198,9 +200,10 @@ class MarketUniverseRepository(BaseRepository[MarketUniverse]):
                     price_change_1h = EXCLUDED.price_change_1h,
                     price_change_24h = EXCLUDED.price_change_24h,
                     interestingness_score = EXCLUDED.interestingness_score,
-                    is_resolved = EXCLUDED.is_resolved,
-                    resolution_outcome = EXCLUDED.resolution_outcome,
-                    resolved_at = EXCLUDED.resolved_at,
+                    is_resolved = COALESCE(EXCLUDED.is_resolved, market_universe.is_resolved),
+                    resolution_outcome = COALESCE(EXCLUDED.resolution_outcome, market_universe.resolution_outcome),
+                    winning_outcome_index = COALESCE(EXCLUDED.winning_outcome_index, market_universe.winning_outcome_index),
+                    resolved_at = COALESCE(EXCLUDED.resolved_at, market_universe.resolved_at),
                     snapshot_at = NOW()
                 """,
                 *v,
@@ -547,3 +550,115 @@ class MarketUniverseRepository(BaseRepository[MarketUniverse]):
         )
         # Parse "DELETE N" result
         return int(result.split()[-1]) if result else 0
+
+    # =========================================================================
+    # Resolution Queries
+    # =========================================================================
+
+    async def get_resolved_markets(
+        self,
+        since: Optional[datetime] = None,
+        limit: int = 1000,
+    ) -> list[MarketUniverse]:
+        """Get resolved markets, optionally filtered by resolved_at."""
+        if since:
+            records = await self.db.fetch(
+                """
+                SELECT * FROM market_universe
+                WHERE is_resolved = TRUE AND resolved_at >= $1
+                ORDER BY resolved_at DESC
+                LIMIT $2
+                """,
+                since,
+                limit,
+            )
+        else:
+            records = await self.db.fetch(
+                """
+                SELECT * FROM market_universe
+                WHERE is_resolved = TRUE
+                ORDER BY resolved_at DESC
+                LIMIT $1
+                """,
+                limit,
+            )
+        return self._records_to_models(records)
+
+    async def get_resolution(self, condition_id: str) -> Optional[dict]:
+        """
+        Get resolution data for a market.
+
+        Returns dict with:
+        - is_resolved: bool
+        - resolution_outcome: str (e.g., "Yes", "No")
+        - winning_outcome_index: int (0, 1, etc.)
+        - resolved_at: datetime
+        """
+        record = await self.db.fetchrow(
+            """
+            SELECT is_resolved, resolution_outcome, winning_outcome_index, resolved_at
+            FROM market_universe
+            WHERE condition_id = $1
+            """,
+            condition_id,
+        )
+        if record is None:
+            return None
+        return dict(record)
+
+    def check_position_won(
+        self,
+        position_outcome_index: int,
+        winning_outcome_index: int,
+    ) -> bool:
+        """
+        Check if a position won based on resolution.
+
+        Args:
+            position_outcome_index: The outcome index the position bet on (0=Yes, 1=No)
+            winning_outcome_index: The actual winning outcome index
+
+        Returns:
+            True if position won, False if lost
+        """
+        return position_outcome_index == winning_outcome_index
+
+    async def get_pnl_for_position(
+        self,
+        condition_id: str,
+        outcome_index: int,
+        entry_price: float,
+        size: float,
+    ) -> Optional[dict]:
+        """
+        Calculate realized P&L for a position if market is resolved.
+
+        Returns dict with:
+        - won: bool
+        - exit_price: float (1.0 if won, 0.0 if lost)
+        - pnl: float
+        - pnl_pct: float
+
+        Returns None if market is not resolved.
+        """
+        resolution = await self.get_resolution(condition_id)
+        if not resolution or not resolution.get("is_resolved"):
+            return None
+
+        winning_outcome_index = resolution.get("winning_outcome_index")
+        if winning_outcome_index is None:
+            return None
+
+        won = outcome_index == winning_outcome_index
+        exit_price = 1.0 if won else 0.0
+        pnl = (exit_price - entry_price) * size
+        pnl_pct = (exit_price - entry_price) / entry_price if entry_price > 0 else 0
+
+        return {
+            "won": won,
+            "exit_price": exit_price,
+            "pnl": pnl,
+            "pnl_pct": pnl_pct,
+            "resolution_outcome": resolution.get("resolution_outcome"),
+            "resolved_at": resolution.get("resolved_at"),
+        }

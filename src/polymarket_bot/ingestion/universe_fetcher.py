@@ -258,7 +258,37 @@ class UniverseFetcher:
                 )
                 await self.universe_repo.save_price_snapshot(snapshot)
 
+        # Sync resolutions from existing polymarket_resolutions table
+        await self._sync_resolutions()
+
         return count
+
+    async def _sync_resolutions(self) -> int:
+        """
+        Sync resolution data from polymarket_resolutions to market_universe.
+
+        This ensures we have resolution outcomes for P&L calculation.
+        """
+        try:
+            result = await self.universe_repo.db.execute("""
+                UPDATE market_universe u
+                SET
+                    is_resolved = TRUE,
+                    resolution_outcome = r.winning_outcome,
+                    winning_outcome_index = r.winning_outcome_index,
+                    resolved_at = r.resolved_at::timestamp
+                FROM polymarket_resolutions r
+                WHERE u.condition_id = r.condition_id
+                  AND (u.is_resolved = FALSE OR u.resolution_outcome IS NULL)
+            """)
+            # Parse "UPDATE N"
+            count = int(result.split()[-1]) if result else 0
+            if count > 0:
+                logger.info(f"Synced {count} resolutions to market_universe")
+            return count
+        except Exception as e:
+            logger.error(f"Error syncing resolutions: {e}")
+            return 0
 
     async def fetch_resolved_markets(self) -> list[MarketUniverse]:
         """Fetch recently resolved markets to update resolution status."""

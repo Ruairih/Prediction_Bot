@@ -429,7 +429,8 @@ class MarketUniverse(BaseModel):
 
     # Resolution
     is_resolved: bool = False
-    resolution_outcome: Optional[str] = None
+    resolution_outcome: Optional[str] = None  # "Yes", "No", or outcome name
+    winning_outcome_index: Optional[int] = None  # 0, 1, etc.
     resolved_at: Optional[datetime] = None
 
     # Timestamps
