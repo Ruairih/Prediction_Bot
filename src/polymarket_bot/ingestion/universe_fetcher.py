@@ -418,13 +418,17 @@ class UniverseUpdater:
                 if now - last_tier_cycle >= self.tier_interval:
                     logger.info("Running tier promotion cycle...")
 
-                    # Update scores first
-                    markets = await self.universe_repo.get_top_by_score(5000)
-                    await self.tier_manager.update_scores_for_markets(markets)
+                    # Update scores for ALL markets, not just top by score
+                    # This ensures new markets with score=0 get evaluated
+                    await self._update_all_scores()
 
                     # Run promotion/demotion
                     stats = await self.tier_manager.run_promotion_cycle()
                     logger.info(f"Tier cycle stats: {stats}")
+
+                    # Run retention cleanup (candles, snapshots)
+                    await self._run_retention_cleanup()
+
                     last_tier_cycle = now
 
                 # Sleep briefly
@@ -466,3 +470,96 @@ class UniverseUpdater:
 
         except Exception as e:
             logger.error(f"Error updating price changes: {e}")
+
+    async def _update_all_scores(self):
+        """
+        Update interestingness scores for ALL non-resolved markets.
+
+        This fixes the Codex-identified issue where only top 5k markets
+        were scored, leaving new markets with score=0 never evaluated.
+
+        Processes in batches to avoid memory issues with large universes.
+        """
+        try:
+            from polymarket_bot.storage.repositories.universe_repo import MarketQuery
+
+            batch_size = 1000
+            offset = 0
+            total_updated = 0
+
+            while True:
+                # Get batch of markets (ordered by score DESC, then by snapshot_at DESC
+                # to prioritize recently updated markets)
+                markets = await self.universe_repo.query(
+                    MarketQuery(
+                        include_resolved=False,
+                        limit=batch_size,
+                        offset=offset,
+                    )
+                )
+
+                if not markets:
+                    break
+
+                # Update scores for this batch
+                updated = await self.tier_manager.update_scores_for_markets(markets)
+                total_updated += updated
+                offset += batch_size
+
+                # Log progress for large universes
+                if offset % 5000 == 0:
+                    logger.debug(f"Score update progress: {offset} markets processed")
+
+            logger.info(f"Updated scores for {total_updated} markets")
+
+        except Exception as e:
+            logger.error(f"Error updating all scores: {e}")
+
+    async def _run_retention_cleanup(self):
+        """
+        Run retention cleanup for candles and snapshots.
+
+        Retention policy:
+        - 5m candles: 7 days
+        - 1h candles: 90 days
+        - 1d candles: keep forever
+        - Price snapshots: 30 days
+        - Orderbook snapshots: 7 days
+        """
+        try:
+            from polymarket_bot.storage.repositories.candle_repo import (
+                CandleRepository,
+                OrderbookRepository,
+            )
+
+            candle_repo = CandleRepository(self.universe_repo.db)
+            orderbook_repo = OrderbookRepository(self.universe_repo.db)
+
+            # Cleanup old candles
+            candle_count = await candle_repo.cleanup_old_candles()
+
+            # Cleanup old orderbook snapshots
+            orderbook_count = await orderbook_repo.cleanup_old_snapshots()
+
+            # Cleanup old price snapshots (30 days)
+            snapshot_result = await self.universe_repo.db.execute(
+                """
+                DELETE FROM price_snapshots
+                WHERE snapshot_at < NOW() - INTERVAL '30 days'
+                """
+            )
+            try:
+                snapshot_count = int(snapshot_result.split()[-1]) if snapshot_result else 0
+            except (ValueError, IndexError):
+                snapshot_count = 0
+
+            total = candle_count + orderbook_count + snapshot_count
+            if total > 0:
+                logger.info(
+                    f"Retention cleanup: {candle_count} candles, "
+                    f"{orderbook_count} orderbook snapshots, "
+                    f"{snapshot_count} price snapshots deleted"
+                )
+
+        except Exception as e:
+            logger.error(f"Error in retention cleanup: {e}")
