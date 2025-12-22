@@ -364,3 +364,159 @@ class TradeWatchlistItem(BaseModel):
     status: str = "watching"  # 'watching', 'promoted', 'expired', 'traded'
     created_at: Optional[int] = None
     updated_at: Optional[int] = None
+
+
+# =============================================================================
+# TIERED DATA ARCHITECTURE
+# =============================================================================
+
+
+class OutcomeToken(BaseModel):
+    """Token representing one outcome of a market."""
+
+    token_id: str
+    outcome: str
+    outcome_index: int
+
+
+class MarketUniverse(BaseModel):
+    """
+    Complete market record from market_universe table (Tier 1).
+
+    Supports both binary (YES/NO) and multi-outcome markets.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    # Identity
+    condition_id: str
+    market_id: Optional[str] = None
+
+    # Metadata
+    question: str
+    description: Optional[str] = None
+    category: Optional[str] = None
+    end_date: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+
+    # Outcomes (supports multi-outcome markets)
+    outcomes: list[OutcomeToken] = Field(default_factory=list)
+    outcome_count: int = 2
+
+    # Price snapshot (primary outcome)
+    price: Optional[float] = None
+    best_bid: Optional[float] = None
+    best_ask: Optional[float] = None
+    spread: Optional[float] = None
+
+    # Volume metrics
+    volume_24h: float = 0
+    volume_total: float = 0
+    liquidity: float = 0
+    trade_count_24h: int = 0
+
+    # Price changes
+    price_change_1h: float = 0
+    price_change_24h: float = 0
+
+    # Scoring
+    interestingness_score: float = 0
+
+    # Tier management
+    tier: int = 1
+    tier_changed_at: Optional[datetime] = None
+    pinned_tier: Optional[int] = None
+
+    # Resolution
+    is_resolved: bool = False
+    resolution_outcome: Optional[str] = None
+    resolved_at: Optional[datetime] = None
+
+    # Timestamps
+    snapshot_at: Optional[datetime] = None
+    created_in_db_at: Optional[datetime] = None
+
+    # Tracking
+    last_strategy_signal_at: Optional[datetime] = None
+    score_below_threshold_since: Optional[datetime] = None
+
+    @property
+    def is_binary(self) -> bool:
+        """Check if this is a binary (YES/NO) market."""
+        return self.outcome_count == 2
+
+    @property
+    def days_to_end(self) -> Optional[float]:
+        """Days until market resolution."""
+        if self.end_date is None:
+            return None
+        delta = self.end_date - datetime.utcnow()
+        return max(0, delta.total_seconds() / 86400)
+
+    @property
+    def market_age_days(self) -> Optional[float]:
+        """Days since market creation."""
+        if self.created_at is None:
+            return None
+        delta = datetime.utcnow() - self.created_at
+        return delta.total_seconds() / 86400
+
+
+class PriceSnapshot(BaseModel):
+    """Price snapshot for tracking changes over time."""
+
+    condition_id: str
+    snapshot_at: datetime
+    price: Optional[float] = None
+    volume_24h: Optional[float] = None
+
+
+class PriceCandle(BaseModel):
+    """OHLCV candle for Tier 2 markets."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    condition_id: str
+    token_id: str
+    resolution: str  # '5m', '1h', '1d'
+    bucket_start: datetime
+
+    open_price: float
+    high_price: float
+    low_price: float
+    close_price: float
+    volume: float = 0
+    trade_count: int = 0
+    vwap: Optional[float] = None
+
+
+class OrderbookSnapshot(BaseModel):
+    """Orderbook snapshot for Tier 3 markets."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    condition_id: str
+    token_id: str
+    snapshot_at: datetime
+
+    best_bid: Optional[float] = None
+    best_ask: Optional[float] = None
+    spread: Optional[float] = None
+    mid_price: Optional[float] = None
+
+    bids: Optional[list[dict]] = None  # [{price, size}, ...]
+    asks: Optional[list[dict]] = None
+
+    bid_depth_5pct: Optional[float] = None
+    ask_depth_5pct: Optional[float] = None
+
+
+class StrategyTierRequest(BaseModel):
+    """Strategy request to promote a market to a specific tier."""
+
+    strategy_name: str
+    condition_id: str
+    requested_tier: int
+    reason: Optional[str] = None
+    requested_at: datetime
+    expires_at: datetime

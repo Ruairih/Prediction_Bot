@@ -29,8 +29,8 @@ from .signals import (
     WatchlistSignal,
 )
 
-# Protocol and context
-from .protocol import Strategy, StrategyContext
+# Protocol and context (includes tiered data architecture types)
+from .protocol import MarketQuery, Strategy, StrategyContext, Tier, TierRequest
 
 # Registry
 from .registry import (
@@ -69,6 +69,10 @@ __all__ = [
     # Protocol
     "Strategy",
     "StrategyContext",
+    # Tiered Data Architecture
+    "Tier",
+    "MarketQuery",
+    "TierRequest",
     # Registry
     "StrategyRegistry",
     "StrategyNotFoundError",

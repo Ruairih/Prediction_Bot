@@ -38,6 +38,15 @@ from polymarket_bot.storage.repositories.watchlist_repo import (
     ScoreHistoryRepository,
     TradeWatchlistRepository,
 )
+# Tiered Data Architecture
+from polymarket_bot.storage.repositories.universe_repo import (
+    MarketQuery,
+    MarketUniverseRepository,
+)
+from polymarket_bot.storage.repositories.candle_repo import (
+    CandleRepository,
+    OrderbookRepository,
+)
 
 __all__ = [
     # Trades
@@ -67,4 +76,9 @@ __all__ = [
     "TradeWatchlistRepository",
     "MarketScoresCacheRepository",
     "ScoreHistoryRepository",
+    # Tiered Data Architecture
+    "MarketUniverseRepository",
+    "MarketQuery",
+    "CandleRepository",
+    "OrderbookRepository",
 ]

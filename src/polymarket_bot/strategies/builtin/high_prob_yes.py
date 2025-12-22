@@ -10,6 +10,11 @@ The strategy logic:
 2. Requires model_score >= 0.97 for immediate entry
 3. Adds to watchlist if score is 0.90-0.97 (may improve)
 4. Applies size filter (>= 50) for better win rate
+
+With tiered data architecture:
+- Discovery: Scans universe for markets approaching 95¢
+- Tier requests: Promotes markets at 93¢+ to Tier 2 (History)
+- Tier requests: Promotes markets at 95¢+ to Tier 3 (Trades)
 """
 from __future__ import annotations
 
@@ -17,7 +22,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from ..filters.size_filter import passes_size_filter
-from ..protocol import StrategyContext
+from ..protocol import MarketQuery, StrategyContext, Tier, TierRequest
 from ..signals import (
     EntrySignal,
     HoldSignal,
@@ -27,7 +32,7 @@ from ..signals import (
 )
 
 if TYPE_CHECKING:
-    pass
+    from polymarket_bot.storage.models import MarketUniverse
 
 
 class HighProbYesStrategy:
@@ -66,6 +71,60 @@ class HighProbYesStrategy:
     def name(self) -> str:
         """Strategy identifier."""
         return "high_prob_yes"
+
+    @property
+    def default_query(self) -> MarketQuery:
+        """
+        Default query for market discovery.
+
+        Scans for markets approaching our price threshold.
+        We start watching at 93¢ to catch markets before they hit 95¢.
+        """
+        return MarketQuery(
+            min_price=0.93,  # Start watching 2¢ below trigger
+            min_volume=5000,  # Need some liquidity
+            max_days_to_end=90,  # Not too far out
+            min_days_to_end=0.25,  # At least 6 hours remaining
+            binary_only=True,  # Only YES/NO markets
+            limit=500,
+        )
+
+    def discover_markets(
+        self, markets: list["MarketUniverse"]
+    ) -> list[TierRequest]:
+        """
+        Scan markets and request tier promotions.
+
+        Promotion logic:
+        - >= 95¢: Promote to Tier 3 (full trade data for execution)
+        - >= 93¢: Promote to Tier 2 (price history for monitoring)
+        """
+        requests = []
+
+        for market in markets:
+            if market.price is None:
+                continue
+
+            # >= 95¢: Ready for execution, need full trade data
+            if market.price >= float(self._price_threshold):
+                requests.append(
+                    TierRequest(
+                        condition_id=market.condition_id,
+                        tier=Tier.TRADES,
+                        reason=f"Price {market.price:.2%} >= {self._price_threshold}, ready for execution",
+                    )
+                )
+            # >= 93¢: Getting close, track price history
+            elif market.price >= 0.93:
+                requests.append(
+                    TierRequest(
+                        condition_id=market.condition_id,
+                        tier=Tier.HISTORY,
+                        reason=f"Price {market.price:.2%} approaching threshold, monitoring",
+                    )
+                )
+
+        return requests
 
     def evaluate(self, context: StrategyContext) -> Signal:
         """
