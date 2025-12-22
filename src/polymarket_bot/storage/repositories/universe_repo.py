@@ -111,8 +111,10 @@ class MarketUniverseRepository(BaseRepository[MarketUniverse]):
                 trade_count_24h = EXCLUDED.trade_count_24h,
                 price_change_1h = EXCLUDED.price_change_1h,
                 price_change_24h = EXCLUDED.price_change_24h,
-                interestingness_score = EXCLUDED.interestingness_score,
-                is_resolved = COALESCE(EXCLUDED.is_resolved, market_universe.is_resolved),
+                -- Keep existing score; only updated by TierManager.update_scores_for_markets()
+                interestingness_score = market_universe.interestingness_score,
+                -- Once resolved, stay resolved (never flip TRUE back to FALSE)
+                is_resolved = market_universe.is_resolved OR EXCLUDED.is_resolved,
                 resolution_outcome = COALESCE(EXCLUDED.resolution_outcome, market_universe.resolution_outcome),
                 winning_outcome_index = COALESCE(EXCLUDED.winning_outcome_index, market_universe.winning_outcome_index),
                 resolved_at = COALESCE(EXCLUDED.resolved_at, market_universe.resolved_at),
@@ -199,8 +201,10 @@ class MarketUniverseRepository(BaseRepository[MarketUniverse]):
                     trade_count_24h = EXCLUDED.trade_count_24h,
                     price_change_1h = EXCLUDED.price_change_1h,
                     price_change_24h = EXCLUDED.price_change_24h,
-                    interestingness_score = EXCLUDED.interestingness_score,
-                    is_resolved = COALESCE(EXCLUDED.is_resolved, market_universe.is_resolved),
+                    -- Keep existing score; only updated by TierManager.update_scores_for_markets()
+                    interestingness_score = market_universe.interestingness_score,
+                    -- Once resolved, stay resolved (never flip TRUE back to FALSE)
+                    is_resolved = market_universe.is_resolved OR EXCLUDED.is_resolved,
                     resolution_outcome = COALESCE(EXCLUDED.resolution_outcome, market_universe.resolution_outcome),
                     winning_outcome_index = COALESCE(EXCLUDED.winning_outcome_index, market_universe.winning_outcome_index),
                     resolved_at = COALESCE(EXCLUDED.resolved_at, market_universe.resolved_at),
@@ -254,22 +258,23 @@ class MarketUniverseRepository(BaseRepository[MarketUniverse]):
             params.append(q.min_interestingness)
             param_idx += 1
 
-        # Time filters (using parameterized intervals)
+        # Time filters - use interval arithmetic for fractional days support
+        # Convert days to seconds for precise intervals (e.g., 0.25 days = 6 hours)
         if q.max_days_to_end is not None:
-            conditions.append(f"end_date <= NOW() + make_interval(days => ${param_idx})")
-            params.append(int(q.max_days_to_end))
+            conditions.append(f"end_date <= NOW() + make_interval(secs => ${param_idx})")
+            params.append(q.max_days_to_end * 86400)  # days -> seconds
             param_idx += 1
         if q.min_days_to_end is not None:
-            conditions.append(f"end_date >= NOW() + make_interval(days => ${param_idx})")
-            params.append(int(q.min_days_to_end))
+            conditions.append(f"end_date >= NOW() + make_interval(secs => ${param_idx})")
+            params.append(q.min_days_to_end * 86400)  # days -> seconds
             param_idx += 1
         if q.min_market_age_days is not None:
-            conditions.append(f"created_at <= NOW() - make_interval(days => ${param_idx})")
-            params.append(int(q.min_market_age_days))
+            conditions.append(f"created_at <= NOW() - make_interval(secs => ${param_idx})")
+            params.append(q.min_market_age_days * 86400)  # days -> seconds
             param_idx += 1
         if q.max_market_age_days is not None:
-            conditions.append(f"created_at >= NOW() - make_interval(days => ${param_idx})")
-            params.append(int(q.max_market_age_days))
+            conditions.append(f"created_at >= NOW() - make_interval(secs => ${param_idx})")
+            params.append(q.max_market_age_days * 86400)  # days -> seconds
             param_idx += 1
 
         # Tier filters

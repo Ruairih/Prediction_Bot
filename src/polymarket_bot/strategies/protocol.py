@@ -44,8 +44,12 @@ class MarketQuery:
     min_days_to_end: Optional[float] = None
     min_market_age_days: Optional[float] = None
     max_market_age_days: Optional[float] = None
+    tier: Optional[int] = None
+    min_tier: Optional[int] = None
+    include_resolved: bool = False
     binary_only: bool = False
     limit: int = 100
+    offset: int = 0
 
 
 @dataclass

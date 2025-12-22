@@ -7,7 +7,7 @@ Built on asyncpg for high-performance async database access.
 Public API:
     Database, DatabaseConfig - Connection pool management
 
-    Models (matching production schema):
+    Models (matching production schema seed/01_schema.sql and seed/02_tiered_data.sql):
         PolymarketTrade, TradeWatermark
         PolymarketFirstTrigger, TriggerWatermark
         PolymarketCandidate, CandidateWatermark
@@ -16,6 +16,13 @@ Public API:
         TradeApproval, ApprovalAlert
         StreamWatchlistItem, PolymarketResolution, PolymarketTokenMeta
         TradeWatchlistItem, MarketScoresCache, ScoreHistory
+
+    Tiered Data Architecture Models:
+        MarketUniverse, OutcomeToken - Full market record with multi-outcome support
+        PriceSnapshot - Price history for change calculation
+        PriceCandle - OHLCV candles for Tier 2 markets
+        OrderbookSnapshot - Orderbook depth for Tier 3 markets
+        StrategyTierRequest - Strategy requests for tier promotion
 
     Repositories:
         TradeRepository, TradeWatermarkRepository
@@ -26,6 +33,7 @@ Public API:
         TradeApprovalRepository, ApprovalAlertRepository
         StreamWatchlistRepository, ResolutionRepository, TokenMetaRepository
         TradeWatchlistRepository, MarketScoresCacheRepository, ScoreHistoryRepository
+        MarketUniverseRepository, CandleRepository, OrderbookRepository
 """
 from polymarket_bot.storage.database import Database, DatabaseConfig
 from polymarket_bot.storage.models import (
@@ -48,6 +56,13 @@ from polymarket_bot.storage.models import (
     TradeWatchlistItem,
     TradeWatermark,
     TriggerWatermark,
+    # Tiered Data Architecture Models
+    MarketUniverse,
+    OutcomeToken,
+    PriceSnapshot,
+    PriceCandle,
+    OrderbookSnapshot,
+    StrategyTierRequest,
 )
 from polymarket_bot.storage.repositories import (
     ApprovalAlertRepository,
@@ -69,6 +84,11 @@ from polymarket_bot.storage.repositories import (
     TradeWatermarkRepository,
     TriggerRepository,
     TriggerWatermarkRepository,
+    # Tiered Data Architecture Repositories
+    MarketUniverseRepository,
+    MarketQuery,
+    CandleRepository,
+    OrderbookRepository,
 )
 
 __all__ = [
@@ -121,4 +141,15 @@ __all__ = [
     "TradeWatchlistRepository",
     "MarketScoresCacheRepository",
     "ScoreHistoryRepository",
+    # Tiered Data Architecture models & repos
+    "MarketUniverse",
+    "OutcomeToken",
+    "PriceSnapshot",
+    "PriceCandle",
+    "OrderbookSnapshot",
+    "StrategyTierRequest",
+    "MarketUniverseRepository",
+    "MarketQuery",
+    "CandleRepository",
+    "OrderbookRepository",
 ]

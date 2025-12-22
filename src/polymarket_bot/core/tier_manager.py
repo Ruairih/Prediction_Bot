@@ -25,7 +25,7 @@ from polymarket_bot.storage.models import MarketUniverse, StrategyTierRequest
 if TYPE_CHECKING:
     from polymarket_bot.storage.repositories.universe_repo import MarketUniverseRepository
     from polymarket_bot.storage.repositories.position_repo import PositionRepository
-    from polymarket_bot.storage.repositories.order_repo import OrderRepository
+    from polymarket_bot.storage.repositories.order_repo import LiveOrderRepository
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +82,7 @@ class TierManager:
         self,
         universe_repo: "MarketUniverseRepository",
         position_repo: Optional["PositionRepository"] = None,
-        order_repo: Optional["OrderRepository"] = None,
+        order_repo: Optional["LiveOrderRepository"] = None,
         limits: Optional[TierLimits] = None,
         thresholds: Optional[TierThresholds] = None,
     ):
@@ -212,8 +212,8 @@ class TierManager:
         # Get condition_ids with pending orders
         order_conditions = set()
         if self.order_repo:
-            pending_orders = await self.order_repo.get_pending()
-            order_conditions = {o.condition_id for o in pending_orders if o.condition_id}
+            active_orders = await self.order_repo.get_active()
+            order_conditions = {o.condition_id for o in active_orders if o.condition_id}
 
         # Priority 1: Markets with positions or orders (must be Tier 3)
         must_promote = position_conditions | order_conditions
@@ -267,8 +267,8 @@ class TierManager:
             protected_conditions.update(p.condition_id for p in open_positions if p.condition_id)
 
         if self.order_repo:
-            pending_orders = await self.order_repo.get_pending()
-            protected_conditions.update(o.condition_id for o in pending_orders if o.condition_id)
+            active_orders = await self.order_repo.get_active()
+            protected_conditions.update(o.condition_id for o in active_orders if o.condition_id)
 
         # Find Tier 3 markets that are inactive
         tier_3_markets = await self.universe_repo.get_by_tier(3)

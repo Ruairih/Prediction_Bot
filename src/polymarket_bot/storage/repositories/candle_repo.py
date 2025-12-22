@@ -176,12 +176,24 @@ class CandleRepository(BaseRepository[PriceCandle]):
               AND size IS NOT NULL
             GROUP BY bucket_start
             ON CONFLICT (condition_id, token_id, resolution, bucket_start) DO UPDATE SET
+                -- Keep original open_price (first trade in bucket)
+                open_price = price_candles.open_price,
+                -- Merge high/low with existing values
                 high_price = GREATEST(price_candles.high_price, EXCLUDED.high_price),
                 low_price = LEAST(price_candles.low_price, EXCLUDED.low_price),
+                -- New close is the most recent
                 close_price = EXCLUDED.close_price,
-                volume = EXCLUDED.volume,
-                trade_count = EXCLUDED.trade_count,
-                vwap = EXCLUDED.vwap
+                -- Accumulate volume and trade_count
+                volume = price_candles.volume + EXCLUDED.volume,
+                trade_count = price_candles.trade_count + EXCLUDED.trade_count,
+                -- Recalculate VWAP as weighted average
+                vwap = CASE
+                    WHEN (price_candles.volume + EXCLUDED.volume) > 0
+                    THEN (COALESCE(price_candles.vwap * price_candles.volume, 0) +
+                          COALESCE(EXCLUDED.vwap * EXCLUDED.volume, 0)) /
+                         (price_candles.volume + EXCLUDED.volume)
+                    ELSE NULL
+                END
             """,
             condition_id,
             token_id,
