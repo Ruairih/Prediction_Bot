@@ -198,10 +198,6 @@ class TierManager:
         """Promote high-priority Tier 2 markets to Tier 3."""
         tier_counts = await self.universe_repo.get_tier_counts()
         current_tier_3 = tier_counts.get(3, 0)
-        available_slots = max(0, self.limits.tier_3_max - current_tier_3)
-
-        if available_slots == 0:
-            return 0
 
         # Get condition_ids with open positions
         position_conditions = set()
@@ -215,26 +211,27 @@ class TierManager:
             active_orders = await self.order_repo.get_active()
             order_conditions = {o.condition_id for o in active_orders if o.condition_id}
 
-        # Priority 1: Markets with positions or orders (must be Tier 3)
+        # Priority 1: Markets with positions or orders MUST be Tier 3
+        # These are promoted regardless of capacity limits (critical for trading)
         must_promote = position_conditions | order_conditions
         count = 0
 
         for condition_id in must_promote:
-            if count >= available_slots:
-                break
+            # Force promote - don't check capacity for active markets
             promoted = await self.universe_repo.promote(
                 condition_id,
                 target_tier=3,
-                reason="Has open position or order",
+                reason="Has open position or order (forced)",
             )
             if promoted:
                 count += 1
-                available_slots -= 1
+                current_tier_3 += 1
 
+        # Priority 2: High-score markets (only if capacity allows)
+        available_slots = max(0, self.limits.tier_3_max - current_tier_3)
         if available_slots <= 0:
             return count
 
-        # Priority 2: High-score markets
         from polymarket_bot.storage.repositories.universe_repo import MarketQuery
 
         candidates = await self.universe_repo.query(

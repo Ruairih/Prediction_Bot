@@ -113,6 +113,32 @@ class UniverseFetcher:
         logger.info(f"Fetched {len(all_markets)} markets total")
         return all_markets
 
+    def _parse_json_field(self, value) -> list:
+        """Parse a field that might be a JSON string or already a list."""
+        import json
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, list):
+                    return parsed
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return []
+
+    def _parse_bool(self, value) -> bool:
+        """Parse a boolean that might be a string 'true'/'false'."""
+        if value is None:
+            return False
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ("true", "1", "yes")
+        return bool(value)
+
     def _parse_market(self, data: dict) -> Optional[MarketUniverse]:
         """Parse API response into MarketUniverse model."""
         try:
@@ -120,16 +146,18 @@ class UniverseFetcher:
             if not condition_id:
                 return None
 
-            # Parse outcomes/tokens
+            # Parse outcomes/tokens - handle JSON strings from API
             outcomes = []
-            tokens = data.get("tokens", []) or data.get("clobTokenIds", [])
+            tokens_raw = data.get("tokens") or data.get("clobTokenIds") or []
+            tokens = self._parse_json_field(tokens_raw)
 
             if isinstance(tokens, list):
                 for i, token in enumerate(tokens):
                     if isinstance(token, dict):
+                        # Full token object with metadata
                         outcomes.append(OutcomeToken(
-                            token_id=token.get("token_id", ""),
-                            outcome=token.get("outcome", f"Outcome {i}"),
+                            token_id=token.get("token_id") or token.get("tokenId") or "",
+                            outcome=token.get("outcome") or (f"Outcome {i}"),
                             outcome_index=i,
                         ))
                     elif isinstance(token, str):
@@ -160,11 +188,13 @@ class UniverseFetcher:
                     pass
 
             # Parse prices (primary outcome = YES = index 0)
+            # outcomePrices may be a JSON string from API
             price = None
-            outcomePrices = data.get("outcomePrices", [])
-            if outcomePrices and len(outcomePrices) > 0:
+            outcome_prices_raw = data.get("outcomePrices", [])
+            outcome_prices = self._parse_json_field(outcome_prices_raw)
+            if outcome_prices and len(outcome_prices) > 0:
                 try:
-                    price = float(outcomePrices[0])
+                    price = float(outcome_prices[0])
                 except (ValueError, TypeError):
                     pass
 
@@ -224,7 +254,7 @@ class UniverseFetcher:
                 volume_24h=volume_24h,
                 volume_total=volume_total,
                 liquidity=liquidity,
-                is_resolved=data.get("closed", False) or data.get("resolved", False),
+                is_resolved=self._parse_bool(data.get("closed")) or self._parse_bool(data.get("resolved")),
             )
 
         except Exception as e:
