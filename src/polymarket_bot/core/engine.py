@@ -107,8 +107,9 @@ class TradingEngine:
         self,
         config: EngineConfig,
         db: "Database",
-        strategy: Strategy,
+        strategy: Optional[Strategy] = None,
         api_client: Optional[Any] = None,  # For orderbook verification
+        execution_service: Optional[Any] = None,  # ExecutionService for order execution
     ) -> None:
         """
         Initialize the trading engine.
@@ -116,13 +117,15 @@ class TradingEngine:
         Args:
             config: Engine configuration
             db: Database connection
-            strategy: Trading strategy to use
+            strategy: Trading strategy to use (required for trading)
             api_client: Optional API client for orderbook verification (G5)
+            execution_service: Optional ExecutionService for order execution
         """
         self.config = config
         self._db = db
         self.strategy = strategy
         self._api_client = api_client
+        self._execution_service = execution_service
 
         # Initialize components
         self._event_processor = EventProcessor(
@@ -137,7 +140,7 @@ class TradingEngine:
         self._stop_event = asyncio.Event()
         self._stats = EngineStats()
 
-        # Order management (placeholder for execution layer)
+        # Order management (used when no execution_service provided)
         self._pending_orders: list[dict] = []
 
     @property
@@ -181,6 +184,9 @@ class TradingEngine:
         if self._is_running:
             logger.warning("Engine already running")
             return
+
+        if self.strategy is None:
+            raise ValueError("Engine requires a strategy to be set before starting")
 
         logger.info(f"Starting trading engine with strategy: {self.strategy.name}")
         logger.info(f"Mode: {'DRY RUN' if self.config.dry_run else 'LIVE'}")
@@ -507,8 +513,7 @@ class TradingEngine:
         """
         Execute an entry order.
 
-        This is a placeholder - the actual implementation is in the
-        execution layer.
+        Uses ExecutionService if available, otherwise logs the order.
 
         Args:
             signal: Entry signal with order details
@@ -517,15 +522,34 @@ class TradingEngine:
         logger.info(
             f"EXECUTE: Buy {signal.size} of {signal.token_id} @ {signal.price}"
         )
-        # TODO: Call execution layer
-        self._pending_orders.append({
-            "type": "entry",
-            "token_id": signal.token_id,
-            "side": signal.side,
-            "price": signal.price,
-            "size": signal.size,
-            "timestamp": datetime.now(timezone.utc),
-        })
+
+        if self._execution_service:
+            # Use ExecutionService for real order execution
+            result = await self._execution_service.execute_entry(signal, context)
+            if not result.success:
+                logger.error(
+                    f"Entry execution failed for {signal.token_id}: "
+                    f"{result.error_type} - {result.error}"
+                )
+                # Raise appropriate exception based on error type
+                # This allows _handle_entry to properly handle trigger removal
+                if result.error_type in ("price_too_high", "insufficient_balance", "validation_error"):
+                    # Pre-submit errors are safe to retry
+                    raise PreSubmitValidationError(result.error)
+                else:
+                    # Other errors (order may have been submitted)
+                    raise Exception(f"Execution failed: {result.error}")
+            logger.info(f"Entry executed: order_id={result.order_id}")
+        else:
+            # Fallback: just track the order internally (for testing)
+            self._pending_orders.append({
+                "type": "entry",
+                "token_id": signal.token_id,
+                "side": signal.side,
+                "price": signal.price,
+                "size": signal.size,
+                "timestamp": datetime.now(timezone.utc),
+            })
 
     async def _execute_exit(
         self,
@@ -535,18 +559,44 @@ class TradingEngine:
         """
         Execute an exit order.
 
+        Uses ExecutionService if available, otherwise logs the order.
+
         Args:
             signal: Exit signal
             context: Strategy context
         """
         logger.info(f"EXECUTE: Exit position {signal.position_id}")
-        # TODO: Call execution layer
-        self._pending_orders.append({
-            "type": "exit",
-            "position_id": signal.position_id,
-            "reason": signal.reason,
-            "timestamp": datetime.now(timezone.utc),
-        })
+
+        if self._execution_service:
+            # Get the position from execution service
+            position = self._execution_service.position_tracker.get_position(
+                signal.position_id
+            )
+            if not position:
+                logger.warning(f"Position {signal.position_id} not found for exit")
+                return
+
+            # Get current price from context if available
+            current_price = getattr(context, 'trigger_price', None)
+
+            result = await self._execution_service.execute_exit(
+                signal, position, current_price
+            )
+            if not result.success:
+                logger.error(
+                    f"Exit execution failed for {signal.position_id}: "
+                    f"{result.error_type} - {result.error}"
+                )
+            else:
+                logger.info(f"Exit executed: position_id={result.position_id}")
+        else:
+            # Fallback: just track the order internally (for testing)
+            self._pending_orders.append({
+                "type": "exit",
+                "position_id": signal.position_id,
+                "reason": signal.reason,
+                "timestamp": datetime.now(timezone.utc),
+            })
 
     async def rescore_watchlist(self) -> list:
         """

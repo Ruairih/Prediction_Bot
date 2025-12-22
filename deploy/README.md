@@ -104,9 +104,11 @@ PRICE_THRESHOLD=0.95
 POSITION_SIZE=20
 MAX_POSITIONS=50
 
-# Monitoring
+# Monitoring & Dashboard
 DASHBOARD_ENABLED=true
+DASHBOARD_HOST=0.0.0.0           # Bind to all interfaces for Docker
 DASHBOARD_PORT=5050
+DASHBOARD_API_KEY=your_secret_key  # REQUIRED when DASHBOARD_HOST=0.0.0.0
 
 # Alerts (optional)
 TELEGRAM_BOT_TOKEN=your_token
@@ -137,15 +139,22 @@ For live trading, create `polymarket_api_creds.json`:
 
 ### Dashboard Endpoints
 
-- `http://localhost:5050/health` - Overall health status
-- `http://localhost:5050/api/positions` - Current positions
-- `http://localhost:5050/api/metrics` - Trading metrics
+| Endpoint | Purpose |
+|----------|---------|
+| `/health` | Overall health status |
+| `/api/status` | Bot status and mode |
+| `/api/positions` | Current positions |
+| `/api/metrics` | Trading metrics |
+| `/api/triggers` | Recent trigger events |
 
 ### Manual Health Check
 
 ```bash
-# Check if services are running
+# Check if services are running (without API key)
 curl -s http://localhost:5050/health | jq .
+
+# With API key (if DASHBOARD_API_KEY is set)
+curl -s -H "X-API-Key: your_secret_key" http://localhost:5050/api/positions | jq .
 
 # Check database connectivity
 psql $DATABASE_URL -c "SELECT 1"
@@ -161,9 +170,12 @@ psql $DATABASE_URL -c "SELECT 1"
 
 ### Dashboard not accessible
 
-1. Check if port 5050 is open: `ss -tlnp | grep 5050`
-2. Kill orphan processes: `fuser -k 5050/tcp`
-3. Check firewall: `sudo ufw allow 5050/tcp`
+1. Check if dashboard binds to correct host: Default is `127.0.0.1` (localhost only)
+   - For network access, set `DASHBOARD_HOST=0.0.0.0` and `DASHBOARD_API_KEY`
+2. Check if port 5050 is open: `ss -tlnp | grep 5050`
+3. Kill orphan processes: `fuser -k 5050/tcp`
+4. Check firewall: `sudo ufw allow 5050/tcp`
+5. If using API key, verify header: `curl -H "X-API-Key: YOUR_KEY" http://host:5050/health`
 
 ### WebSocket disconnections
 

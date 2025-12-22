@@ -40,11 +40,19 @@ class ExitEvent:
     """Records a position exit."""
 
     position_id: str
+    token_id: str
+    condition_id: str
+    exit_type: str  # e.g., "profit_target", "stop_loss", "resolution", "manual"
+    entry_price: Decimal
     exit_price: Decimal
-    exit_size: Decimal
-    realized_pnl: Decimal
+    size: Decimal
+    gross_pnl: Decimal
+    net_pnl: Decimal  # After fees (for now same as gross)
+    hours_held: float
     reason: str
-    exit_time: datetime
+    created_at: datetime
+    exit_order_id: Optional[str] = None
+    status: str = "pending"  # pending, executed, failed
 
 
 class PositionTracker:
@@ -95,16 +103,24 @@ class PositionTracker:
         """
         Record a fill and create/update position.
 
+        Handles both full fills (FILLED) and partial fills (PARTIAL).
+        For partial fills, uses filled_size instead of total size.
+
         Args:
-            order: Filled order
+            order: Order with fill (FILLED or PARTIAL status)
 
         Returns:
             Position that was created or updated
         """
-        if order.status != OrderStatus.FILLED:
+        # Accept both FILLED and PARTIAL orders
+        if order.status not in (OrderStatus.FILLED, OrderStatus.PARTIAL):
             return None
 
-        fill_size = order.filled_size or order.size
+        # Use filled_size for partial fills, or full size for complete fills
+        fill_size = order.filled_size
+        if fill_size <= Decimal("0"):
+            return None  # No fill to record
+
         fill_price = order.avg_fill_price or order.price
 
         # Check for existing position
@@ -168,6 +184,91 @@ class PositionTracker:
 
             await self._save_position(position)
             logger.info(f"Created position {position_id}: {fill_size} @ {fill_price}")
+            return position
+
+    async def record_fill_delta(
+        self,
+        order: Order,
+        delta_size: Decimal,
+    ) -> Optional[Position]:
+        """
+        Record a fill delta and create/update position.
+
+        Unlike record_fill which uses order.filled_size, this method
+        explicitly takes the delta size to avoid double-counting when
+        called multiple times during partial fill syncs.
+
+        Args:
+            order: Order with fill information (for price, token_id, etc.)
+            delta_size: The NEW fill amount to add (not total filled)
+
+        Returns:
+            Position that was created or updated
+        """
+        if delta_size <= Decimal("0"):
+            return None
+
+        fill_price = order.avg_fill_price or order.price
+
+        # Check for existing position
+        existing_position_id = self._token_positions.get(order.token_id)
+
+        if existing_position_id and existing_position_id in self.positions:
+            # Aggregate with existing position
+            position = self.positions[existing_position_id]
+
+            if order.side == "BUY":
+                # Add to position - calculate weighted average price
+                old_cost = position.entry_cost
+                new_cost = delta_size * fill_price
+                total_size = position.size + delta_size
+                total_cost = old_cost + new_cost
+
+                position.size = total_size
+                position.entry_cost = total_cost
+                position.entry_price = total_cost / total_size if total_size > 0 else Decimal("0")
+
+            else:  # SELL - reduce position
+                sell_ratio = delta_size / position.size if position.size > 0 else Decimal("1")
+                position.size -= delta_size
+                position.entry_cost -= position.entry_cost * sell_ratio
+
+                # Realized P&L for this exit
+                pnl = delta_size * (fill_price - position.entry_price)
+                position.realized_pnl += pnl
+
+                if position.size <= 0:
+                    position.status = "closed"
+                    if order.token_id in self._token_positions:
+                        del self._token_positions[order.token_id]
+
+            await self._save_position(position)
+            logger.info(f"Updated position {position.position_id}: +{delta_size} (total size={position.size})")
+            return position
+
+        else:
+            # Create new position (only for BUY)
+            if order.side != "BUY":
+                return None
+
+            position_id = f"pos_{uuid.uuid4().hex[:12]}"
+            now = datetime.now(timezone.utc)
+
+            position = Position(
+                position_id=position_id,
+                token_id=order.token_id,
+                condition_id=order.condition_id,
+                size=delta_size,
+                entry_price=fill_price,
+                entry_cost=delta_size * fill_price,
+                entry_time=now,
+            )
+
+            self.positions[position_id] = position
+            self._token_positions[order.token_id] = position_id
+
+            await self._save_position(position)
+            logger.info(f"Created position {position_id}: {delta_size} @ {fill_price}")
             return position
 
     def get_open_positions(self) -> List[Position]:
@@ -272,15 +373,25 @@ class PositionTracker:
         # Calculate realized P&L
         pnl = position.size * (exit_price - position.entry_price)
 
-        # Create exit event
+        # Calculate hours held
         now = datetime.now(timezone.utc)
+        hours_held = (now - position.entry_time).total_seconds() / 3600
+
+        # Create exit event with all schema-required fields
         exit_event = ExitEvent(
             position_id=position_id,
+            token_id=position.token_id,
+            condition_id=position.condition_id,
+            exit_type=reason,  # reason serves as exit_type
+            entry_price=position.entry_price,
             exit_price=exit_price,
-            exit_size=position.size,
-            realized_pnl=pnl,
+            size=position.size,
+            gross_pnl=pnl,
+            net_pnl=pnl,  # Same as gross for now (no fee tracking yet)
+            hours_held=hours_held,
             reason=reason,
-            exit_time=now,
+            created_at=now,
+            status="pending",
         )
 
         # Store exit event
@@ -321,8 +432,8 @@ class PositionTracker:
     async def load_positions(self) -> None:
         """Load positions from database."""
         query = """
-            SELECT position_id, token_id, condition_id, size, entry_price,
-                   entry_cost, entry_time, realized_pnl, status
+            SELECT id AS position_id, token_id, condition_id, size, entry_price,
+                   entry_cost, entry_timestamp AS entry_time, realized_pnl, status
             FROM positions
             WHERE status = 'open'
         """
@@ -347,19 +458,18 @@ class PositionTracker:
         """Persist position to database."""
         query = """
             INSERT INTO positions
-            (position_id, token_id, condition_id, size, entry_price, entry_cost,
-             entry_time, realized_pnl, status)
+            (token_id, condition_id, size, entry_price, entry_cost,
+             entry_timestamp, realized_pnl, status, created_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            ON CONFLICT (position_id) DO UPDATE
-            SET size = $4,
-                entry_price = $5,
-                entry_cost = $6,
-                realized_pnl = $8,
-                status = $9
+            ON CONFLICT (token_id, entry_timestamp) DO UPDATE
+            SET size = $3,
+                entry_price = $4,
+                entry_cost = $5,
+                realized_pnl = $7,
+                status = $8
         """
         await self._db.execute(
             query,
-            position.position_id,
             position.token_id,
             position.condition_id,
             float(position.size),
@@ -368,21 +478,32 @@ class PositionTracker:
             position.entry_time.isoformat(),
             float(position.realized_pnl),
             position.status,
+            position.entry_time.isoformat(),  # created_at
         )
 
     async def _save_exit_event(self, event: ExitEvent) -> None:
         """Persist exit event to database."""
         query = """
             INSERT INTO exit_events
-            (position_id, exit_price, exit_size, realized_pnl, reason, exit_time)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            (position_id, token_id, condition_id, exit_type, entry_price,
+             exit_price, size, gross_pnl, net_pnl, hours_held,
+             exit_order_id, status, reason, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         """
         await self._db.execute(
             query,
-            event.position_id,
+            event.position_id,  # Note: schema expects INTEGER but we use string
+            event.token_id,
+            event.condition_id,
+            event.exit_type,
+            float(event.entry_price),
             float(event.exit_price),
-            float(event.exit_size),
-            float(event.realized_pnl),
+            float(event.size),
+            float(event.gross_pnl),
+            float(event.net_pnl),
+            event.hours_held,
+            event.exit_order_id,
+            event.status,
             event.reason,
-            event.exit_time.isoformat(),
+            event.created_at.isoformat(),
         )

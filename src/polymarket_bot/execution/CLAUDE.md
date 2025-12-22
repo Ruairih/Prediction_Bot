@@ -73,6 +73,7 @@ See `polymarket_api_creds.json.example` in the project root:
 ```
 execution/
 ├── __init__.py
+├── service.py              # ExecutionService facade (primary interface)
 ├── order_manager.py        # Order submission and tracking
 ├── position_tracker.py     # Position management
 ├── exit_manager.py         # Exit strategy execution
@@ -85,6 +86,71 @@ execution/
 │   ├── test_exit_manager.py
 │   └── test_balance_manager.py
 └── CLAUDE.md               # This file
+```
+
+## ExecutionService Facade
+
+The `ExecutionService` is the **primary interface** for the execution layer. Other components (TradingEngine, BackgroundTasksManager) should use this service instead of calling individual managers directly.
+
+### Why a Facade?
+
+1. **Encapsulation**: Hides complexity of coordinating 4 managers
+2. **Consistency**: Ensures proper ordering (balance check → order → position → balance refresh)
+3. **State Management**: Handles state rehydration on startup
+4. **G4 Protection**: Automatically refreshes balance after fills
+
+### Usage
+
+```python
+from polymarket_bot.execution import ExecutionService, ExecutionConfig
+
+config = ExecutionConfig(
+    max_price=Decimal("0.95"),
+    default_position_size=Decimal("20"),
+    min_balance_reserve=Decimal("100"),
+    profit_target=Decimal("0.99"),
+    stop_loss=Decimal("0.90"),
+    min_hold_days=7,
+)
+
+service = ExecutionService(
+    db=database,
+    clob_client=clob_client,  # None for dry run
+    config=config,
+)
+
+# Load state on startup (REQUIRED)
+await service.load_state()
+
+# Execute entry
+result = await service.execute_entry(signal, context)
+if result.success:
+    print(f"Order {result.order_id} submitted")
+
+# Execute exit
+result = await service.execute_exit(signal, position, current_price)
+
+# Background sync (called by BackgroundTasksManager)
+await service.sync_open_orders()
+exits = await service.evaluate_exits(current_prices)
+```
+
+### State Rehydration
+
+On startup, `load_state()` restores:
+
+1. **Balance**: Refreshes from CLOB API
+2. **Open Orders**: Loads from DB, restores balance reservations
+3. **Open Positions**: Loads from DB for exit monitoring
+
+```python
+# In OrderManager.load_orders()
+query = """
+    SELECT order_id, token_id, condition_id, side, price, size,
+           filled_size, avg_fill_price, status, created_at, updated_at
+    FROM orders WHERE status IN ('pending', 'live', 'partial')
+"""
+# Restores orders to cache AND recreates balance reservations
 ```
 
 ## Test Fixtures (conftest.py)
@@ -927,3 +993,68 @@ await self._position_tracker.close_position(...)
 
 - `TestPartialFillHandling` - Tests for balance reservation adjustments
 - `TestOrderFillConfirmation` - Tests for exit order confirmation waiting
+
+### State Rehydration Fix
+
+**Problem:** On restart, open orders were lost and balance reservations weren't restored, potentially causing over-allocation.
+
+**Solution:** Added `load_orders()` method in `order_manager.py`:
+
+```python
+async def load_orders(self) -> int:
+    """Load open orders from database and restore balance reservations."""
+    query = """
+        SELECT order_id, token_id, condition_id, side, price, size,
+               filled_size, avg_fill_price, status, created_at, updated_at
+        FROM orders WHERE status IN ('pending', 'live', 'partial')
+    """
+    # Restores orders to cache AND recreates balance reservations
+    for order in orders:
+        remaining_size = order.size - order.filled_size
+        reservation_amount = remaining_size * order.price
+        self._balance_manager.reserve(reservation_amount, order.order_id)
+```
+
+**Updated `ExecutionService.load_state()`:**
+```python
+async def load_state(self) -> None:
+    # 1. Refresh balance from CLOB first
+    self._balance_manager.refresh_balance()
+
+    # 2. Load open orders and restore reservations
+    orders_loaded = await self._order_manager.load_orders()
+
+    # 3. Load open positions
+    await self._position_tracker.load_positions()
+```
+
+### Partial Fill Position Tracking Fix
+
+**Problem:** Only fully filled orders (FILLED status) created positions. Partial fills were ignored until completely filled.
+
+**Solution:** Updated `PositionTracker.record_fill()` to accept PARTIAL status:
+
+```python
+async def record_fill(self, order: Order) -> Optional[Position]:
+    # Accept both FILLED and PARTIAL orders
+    if order.status not in (OrderStatus.FILLED, OrderStatus.PARTIAL):
+        return None
+
+    # Use filled_size, not total size
+    fill_size = order.filled_size
+    if fill_size <= Decimal("0"):
+        return None
+```
+
+**Updated `sync_open_orders()` to detect incremental fills:**
+```python
+async def sync_open_orders(self) -> int:
+    for order in open_orders:
+        old_filled = order.filled_size
+        updated = await self._order_manager.sync_order_status(order.order_id)
+
+        # Detect new fills
+        new_filled = updated.filled_size - old_filled
+        if new_filled > Decimal("0"):
+            await self._position_tracker.record_fill(updated)
+```

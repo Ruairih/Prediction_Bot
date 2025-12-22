@@ -274,3 +274,234 @@ class TestBalanceRefresh:
         # Should have called get_balance after sync
         # (once on init, once on sync)
         assert mock_clob_client.get_balance.call_count >= 2
+
+
+class TestLoadOrders:
+    """Tests for loading orders from database on startup."""
+
+    @pytest.mark.asyncio
+    async def test_loads_open_orders_from_db(self, mock_db, mock_clob_client):
+        """Should load pending/live/partial orders from database."""
+        # Mock database to return open orders
+        mock_db.fetch.return_value = [
+            {
+                "order_id": "order_db_1",
+                "token_id": "tok_yes_abc",
+                "condition_id": "0xtest123",
+                "side": "BUY",
+                "price": 0.95,
+                "size": 20,
+                "filled_size": 0,
+                "avg_fill_price": None,
+                "status": "pending",
+                "created_at": 1700000000,
+                "updated_at": 1700000000,
+            }
+        ]
+
+        manager = OrderManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=OrderConfig(max_price=Decimal("0.95")),
+        )
+
+        count = await manager.load_orders()
+
+        assert count == 1
+        assert "order_db_1" in manager._orders
+
+    @pytest.mark.asyncio
+    async def test_restores_balance_reservations(self, mock_db, mock_clob_client):
+        """Should restore balance reservations for loaded orders."""
+        mock_db.fetch.return_value = [
+            {
+                "order_id": "order_restore",
+                "token_id": "tok_yes_abc",
+                "condition_id": "0xtest123",
+                "side": "BUY",
+                "price": 0.95,
+                "size": 20,
+                "filled_size": 0,
+                "avg_fill_price": None,
+                "status": "live",
+                "created_at": 1700000000,
+                "updated_at": 1700000000,
+            }
+        ]
+
+        manager = OrderManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=OrderConfig(max_price=Decimal("0.95")),
+        )
+
+        initial_balance = manager.get_available_balance()
+
+        await manager.load_orders()
+
+        new_balance = manager.get_available_balance()
+
+        # Should have reserved 20 * 0.95 = $19
+        assert new_balance == initial_balance - Decimal("19.00")
+
+    @pytest.mark.asyncio
+    async def test_restores_partial_fill_reservations(self, mock_db, mock_clob_client):
+        """Should restore reservations for unfilled portion only."""
+        mock_db.fetch.return_value = [
+            {
+                "order_id": "order_partial",
+                "token_id": "tok_yes_abc",
+                "condition_id": "0xtest123",
+                "side": "BUY",
+                "price": 0.95,
+                "size": 20,
+                "filled_size": 10,  # 50% filled
+                "avg_fill_price": 0.95,
+                "status": "partial",
+                "created_at": 1700000000,
+                "updated_at": 1700000000,
+            }
+        ]
+
+        manager = OrderManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=OrderConfig(max_price=Decimal("0.95")),
+        )
+
+        initial_balance = manager.get_available_balance()
+
+        await manager.load_orders()
+
+        new_balance = manager.get_available_balance()
+
+        # Should only reserve unfilled portion: 10 * 0.95 = $9.50
+        assert new_balance == initial_balance - Decimal("9.50")
+
+    @pytest.mark.asyncio
+    async def test_handles_insufficient_balance_gracefully(self, mock_db, mock_clob_client):
+        """Should track orders even when reservation fails due to low balance."""
+        # Return multiple orders that together exceed balance
+        mock_db.fetch.return_value = [
+            {
+                "order_id": "order_1",
+                "token_id": "tok_1",
+                "condition_id": "0x1",
+                "side": "BUY",
+                "price": 0.95,
+                "size": 500,  # $475 - this will work
+                "filled_size": 0,
+                "avg_fill_price": None,
+                "status": "live",
+                "created_at": 1700000000,
+                "updated_at": 1700000000,
+            },
+            {
+                "order_id": "order_2",
+                "token_id": "tok_2",
+                "condition_id": "0x2",
+                "side": "BUY",
+                "price": 0.95,
+                "size": 1000,  # $950 - this will exceed balance
+                "filled_size": 0,
+                "avg_fill_price": None,
+                "status": "live",
+                "created_at": 1700000000,
+                "updated_at": 1700000000,
+            },
+        ]
+
+        manager = OrderManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=OrderConfig(max_price=Decimal("0.95")),
+        )
+
+        # Should not raise - handles gracefully
+        count = await manager.load_orders()
+
+        # Should still track both orders
+        assert count == 2
+        assert "order_1" in manager._orders
+        assert "order_2" in manager._orders
+
+    @pytest.mark.asyncio
+    async def test_loads_multiple_orders(self, mock_db, mock_clob_client):
+        """Should load multiple orders correctly."""
+        mock_db.fetch.return_value = [
+            {
+                "order_id": f"order_{i}",
+                "token_id": f"tok_{i}",
+                "condition_id": f"0x{i}",
+                "side": "BUY",
+                "price": 0.95,
+                "size": 10,
+                "filled_size": 0,
+                "avg_fill_price": None,
+                "status": "live",
+                "created_at": 1700000000,
+                "updated_at": 1700000000,
+            }
+            for i in range(5)
+        ]
+
+        manager = OrderManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=OrderConfig(max_price=Decimal("0.95")),
+        )
+
+        count = await manager.load_orders()
+
+        assert count == 5
+        assert len(manager._orders) == 5
+
+    @pytest.mark.asyncio
+    async def test_loads_zero_orders_when_db_empty(self, mock_db, mock_clob_client):
+        """Should handle empty database gracefully."""
+        mock_db.fetch.return_value = []
+
+        manager = OrderManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=OrderConfig(max_price=Decimal("0.95")),
+        )
+
+        count = await manager.load_orders()
+
+        assert count == 0
+        assert len(manager._orders) == 0
+
+    @pytest.mark.asyncio
+    async def test_sell_orders_skip_reservation(self, mock_db, mock_clob_client):
+        """SELL orders should not create reservations (they don't consume balance)."""
+        mock_db.fetch.return_value = [
+            {
+                "order_id": "sell_order",
+                "token_id": "tok_yes_abc",
+                "condition_id": "0xtest123",
+                "side": "SELL",
+                "price": 0.99,
+                "size": 20,
+                "filled_size": 0,
+                "avg_fill_price": None,
+                "status": "live",
+                "created_at": 1700000000,
+                "updated_at": 1700000000,
+            }
+        ]
+
+        manager = OrderManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=OrderConfig(max_price=Decimal("0.95")),
+        )
+
+        initial_balance = manager.get_available_balance()
+
+        await manager.load_orders()
+
+        new_balance = manager.get_available_balance()
+
+        # SELL orders don't reserve balance
+        assert new_balance == initial_balance

@@ -80,9 +80,10 @@ class MetricsCollector:
         if not self._db:
             return 0.0
 
+        # Use net_pnl (schema column) instead of realized_pnl
         query = """
             SELECT
-                COUNT(*) FILTER (WHERE realized_pnl > 0) as wins,
+                COUNT(*) FILTER (WHERE net_pnl > 0) as wins,
                 COUNT(*) as total
             FROM exit_events
         """
@@ -103,7 +104,8 @@ class MetricsCollector:
         if not self._db:
             return Decimal("0")
 
-        query = "SELECT COALESCE(SUM(realized_pnl), 0) as total FROM exit_events"
+        # Use net_pnl (schema column) instead of realized_pnl
+        query = "SELECT COALESCE(SUM(net_pnl), 0) as total FROM exit_events"
         result = await self._db.fetchrow(query)
 
         if not result:
@@ -218,7 +220,7 @@ class MetricsCollector:
         if not self._db:
             return 0
 
-        query = "SELECT COUNT(*) as count FROM exit_events WHERE realized_pnl > 0"
+        query = "SELECT COUNT(*) as count FROM exit_events WHERE net_pnl > 0"
         result = await self._db.fetchrow(query)
 
         if not result:
@@ -236,7 +238,7 @@ class MetricsCollector:
         if not self._db:
             return 0
 
-        query = "SELECT COUNT(*) as count FROM exit_events WHERE realized_pnl < 0"
+        query = "SELECT COUNT(*) as count FROM exit_events WHERE net_pnl < 0"
         result = await self._db.fetchrow(query)
 
         if not result:

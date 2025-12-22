@@ -358,9 +358,17 @@ class PolymarketWebSocket:
         if not self._stop_event.is_set():
             await self._connect()
 
-    async def _handle_message(self, raw_message: str) -> None:
+    async def _handle_message(self, raw_message: str | bytes) -> None:
         """Parse and handle a WebSocket message."""
         try:
+            # Handle bytes - convert to string
+            if isinstance(raw_message, bytes):
+                try:
+                    raw_message = raw_message.decode('utf-8')
+                except UnicodeDecodeError:
+                    # Binary frame (ping/pong) - ignore silently
+                    return
+
             # Handle empty string as heartbeat/acknowledgment
             if not raw_message or not raw_message.strip():
                 logger.debug("Received empty message (heartbeat)")
@@ -384,8 +392,10 @@ class PolymarketWebSocket:
             if isinstance(data, dict):
                 await self._handle_single_message(data)
 
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse message: {e}")
+        except json.JSONDecodeError:
+            # Polymarket sends non-JSON acknowledgment frames after bulk subscriptions
+            # This is normal - only log at debug level to reduce noise
+            logger.debug(f"Non-JSON message received (length: {len(raw_message) if raw_message else 0})")
 
         except Exception as e:
             logger.error(f"Error handling message: {e}")

@@ -111,6 +111,7 @@ class Dashboard:
         db: Optional["Database"] = None,
         health_checker: Optional[Any] = None,
         metrics_collector: Optional[Any] = None,
+        event_loop: Optional[asyncio.AbstractEventLoop] = None,
     ) -> None:
         """
         Initialize the dashboard.
@@ -119,14 +120,62 @@ class Dashboard:
             db: Database connection
             health_checker: HealthChecker instance
             metrics_collector: MetricsCollector instance
+            event_loop: Main asyncio event loop for dispatching async calls.
+                       CRITICAL: Flask runs in a separate thread, so we must
+                       use run_coroutine_threadsafe() to execute async DB calls
+                       on the main loop where asyncpg pool was created.
         """
         self._db = db
         self._health_checker = health_checker
         self._metrics_collector = metrics_collector
+        self._event_loop = event_loop
 
         # SSE subscribers
         self._sse_queues: List[queue.Queue] = []
         self._sse_lock = threading.Lock()
+
+    def _run_async(self, coro, timeout: float = 10.0) -> Any:
+        """
+        Run an async coroutine from the Flask thread safely.
+
+        Uses run_coroutine_threadsafe to dispatch to the main event loop
+        where the asyncpg pool was created. This avoids "attached to a
+        different loop" errors.
+
+        Args:
+            coro: Coroutine to execute
+            timeout: Timeout in seconds
+
+        Returns:
+            Result of the coroutine
+
+        Raises:
+            RuntimeError: If event loop is not running (shutdown in progress)
+            TimeoutError: If operation times out
+        """
+        import concurrent.futures
+
+        if self._event_loop is None:
+            # Fallback: create new loop (only for testing without main loop)
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(coro)
+            finally:
+                loop.close()
+
+        # Check if loop is still running (prevents hangs during shutdown)
+        if self._event_loop.is_closed() or not self._event_loop.is_running():
+            raise RuntimeError("Event loop is not running (shutdown in progress)")
+
+        # Dispatch to main event loop from Flask thread
+        future = asyncio.run_coroutine_threadsafe(coro, self._event_loop)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            # Cancel the task to avoid piling up stale coroutines
+            future.cancel()
+            logger.error(f"Async operation timed out after {timeout}s")
+            raise TimeoutError(f"Operation timed out after {timeout}s")
 
     def create_app(self, testing: bool = False) -> "Flask":
         """
@@ -165,13 +214,11 @@ class Dashboard:
             dashboard: Dashboard = app.dashboard  # type: ignore
 
             if dashboard._health_checker:
-                # Run async health check
+                # Run async health check via main event loop
                 try:
-                    loop = asyncio.new_event_loop()
-                    health_result = loop.run_until_complete(
+                    health_result = dashboard._run_async(
                         dashboard._health_checker.check_all()
                     )
-                    loop.close()
 
                     return jsonify({
                         "status": health_result.status.value,
@@ -208,10 +255,7 @@ class Dashboard:
                 return jsonify({"positions": [], "error": "Database not configured"})
 
             try:
-                loop = asyncio.new_event_loop()
-                result = loop.run_until_complete(dashboard._get_positions())
-                loop.close()
-
+                result = dashboard._run_async(dashboard._get_positions())
                 return jsonify({"positions": result})
             except Exception as e:
                 logger.error(f"Failed to get positions: {e}")
@@ -227,10 +271,7 @@ class Dashboard:
                 return jsonify({"entries": [], "error": "Database not configured"})
 
             try:
-                loop = asyncio.new_event_loop()
-                result = loop.run_until_complete(dashboard._get_watchlist())
-                loop.close()
-
+                result = dashboard._run_async(dashboard._get_watchlist())
                 return jsonify({"entries": result})
             except Exception as e:
                 logger.error(f"Failed to get watchlist: {e}")
@@ -244,11 +285,9 @@ class Dashboard:
 
             if dashboard._metrics_collector:
                 try:
-                    loop = asyncio.new_event_loop()
-                    result = loop.run_until_complete(
+                    result = dashboard._run_async(
                         dashboard._metrics_collector.get_all_metrics()
                     )
-                    loop.close()
 
                     return jsonify({
                         "total_trades": result.total_trades,
@@ -284,11 +323,7 @@ class Dashboard:
 
             try:
                 limit = request.args.get("limit", 50, type=int)
-
-                loop = asyncio.new_event_loop()
-                result = loop.run_until_complete(dashboard._get_triggers(limit))
-                loop.close()
-
+                result = dashboard._run_async(dashboard._get_triggers(limit))
                 return jsonify({"triggers": result})
             except Exception as e:
                 logger.error(f"Failed to get triggers: {e}")
@@ -545,24 +580,25 @@ class Dashboard:
         if not self._db:
             return []
 
+        # Use correct column names: id (not position_id), entry_timestamp (not entry_time)
         query = """
-            SELECT position_id, token_id, condition_id, size, entry_price,
-                   entry_cost, entry_time, realized_pnl, status
+            SELECT id, token_id, condition_id, size, entry_price,
+                   entry_cost, entry_timestamp, realized_pnl, status
             FROM positions
             WHERE status = 'open'
-            ORDER BY entry_time DESC
+            ORDER BY entry_timestamp DESC
         """
         records = await self._db.fetch(query)
 
         return [
             {
-                "position_id": r["position_id"],
+                "position_id": str(r["id"]),  # Map id to position_id for API compatibility
                 "token_id": r["token_id"],
                 "condition_id": r["condition_id"],
                 "size": float(r["size"]),
                 "entry_price": float(r["entry_price"]),
                 "entry_cost": float(r["entry_cost"]),
-                "entry_time": r["entry_time"],
+                "entry_time": r["entry_timestamp"],  # Map entry_timestamp to entry_time for API
                 "realized_pnl": float(r.get("realized_pnl", 0) or 0),
                 "status": r["status"],
             }

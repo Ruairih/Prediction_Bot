@@ -71,6 +71,7 @@ services:
       - DASHBOARD_ENABLED=true
       - DASHBOARD_HOST=0.0.0.0
       - DASHBOARD_PORT=5050
+      - DASHBOARD_API_KEY=${DASHBOARD_API_KEY:-}  # Set this for security!
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     command: python -m polymarket_bot.monitoring.dashboard --host 0.0.0.0 --port 5050
     healthcheck:

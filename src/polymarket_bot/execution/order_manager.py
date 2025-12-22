@@ -435,3 +435,88 @@ class OrderManager:
             order.status.value,
             now,
         )
+
+    async def load_orders(self) -> int:
+        """
+        Load open orders from database on startup.
+
+        Restores orders that are pending, live, or partial.
+        Also restores balance reservations for these orders.
+
+        Returns:
+            Number of orders loaded
+        """
+        query = """
+            SELECT order_id, token_id, condition_id, side, price, size,
+                   filled_size, avg_fill_price, status, created_at, updated_at
+            FROM orders
+            WHERE status IN ('pending', 'live', 'partial')
+        """
+        records = await self._db.fetch(query)
+
+        count = 0
+        for record in records:
+            try:
+                order = Order(
+                    order_id=record["order_id"],
+                    token_id=record["token_id"],
+                    condition_id=record["condition_id"],
+                    side=record["side"],
+                    price=Decimal(str(record["price"])),
+                    size=Decimal(str(record["size"])),
+                    status=OrderStatus(record["status"]),
+                    filled_size=Decimal(str(record["filled_size"] or 0)),
+                    avg_fill_price=Decimal(str(record["avg_fill_price"]))
+                    if record["avg_fill_price"]
+                    else None,
+                    created_at=datetime.fromtimestamp(
+                        record["created_at"], tz=timezone.utc
+                    )
+                    if record["created_at"]
+                    else None,
+                    updated_at=datetime.fromtimestamp(
+                        record["updated_at"], tz=timezone.utc
+                    )
+                    if record["updated_at"]
+                    else None,
+                )
+
+                # Restore balance reservation for unfilled portion BEFORE caching
+                # This ensures we don't have an order in cache without reservation
+                # Only BUY orders reserve balance (SELL orders don't consume balance)
+                unfilled_size = order.size - order.filled_size
+                reservation_failed = False
+
+                if order.side == "BUY" and unfilled_size > Decimal("0"):
+                    reservation_amount = order.price * unfilled_size
+                    try:
+                        self._balance_manager.reserve(
+                            amount=reservation_amount,
+                            order_id=order.order_id,
+                        )
+                        logger.debug(
+                            f"Restored reservation {reservation_amount} for order {order.order_id}"
+                        )
+                    except InsufficientBalanceError as e:
+                        # Still track the order (it's real on CLOB) but warn about balance
+                        reservation_failed = True
+                        logger.warning(
+                            f"Could not restore full reservation for order {order.order_id}: "
+                            f"required {reservation_amount}, {e}. Order will still be tracked."
+                        )
+
+                # Add to local cache after reservation attempt
+                self._orders[order.order_id] = order
+                count += 1
+
+                if reservation_failed:
+                    logger.warning(
+                        f"Order {order.order_id} loaded without full reservation - "
+                        f"balance may be insufficient for new orders"
+                    )
+
+            except Exception as e:
+                logger.error(f"Error loading order {record.get('order_id')}: {e}")
+
+        logger.info(f"Loaded {count} open orders from database")
+        return count

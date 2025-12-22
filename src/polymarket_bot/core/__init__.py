@@ -11,6 +11,8 @@ This module provides:
     - WatchlistService: Watchlist re-scoring and promotion
     - WatchlistEntry: A token being watched
     - Promotion: A watchlist entry promoted to execution
+    - BackgroundTasksManager: Manages async background loops
+    - BackgroundTaskConfig: Configuration for background tasks
 
 Critical Gotchas Handled:
     - G1: Stale trade filtering (via EventProcessor)
@@ -37,6 +39,9 @@ from .trigger_tracker import TriggerTracker, TriggerInfo
 # Watchlist management
 from .watchlist_service import WatchlistService, WatchlistEntry, Promotion
 
+# Background tasks
+from .background_tasks import BackgroundTasksManager, BackgroundTaskConfig
+
 __all__ = [
     # Main engine
     "TradingEngine",
@@ -52,4 +57,7 @@ __all__ = [
     "WatchlistService",
     "WatchlistEntry",
     "Promotion",
+    # Background tasks
+    "BackgroundTasksManager",
+    "BackgroundTaskConfig",
 ]

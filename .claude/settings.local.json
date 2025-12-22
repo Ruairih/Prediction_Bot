@@ -17,7 +17,21 @@
       "Bash(netstat:*)",
       "Bash(ss:*)",
       "Bash(docker kill:*)",
-      "Bash(docker restart:*)"
+      "Bash(docker restart:*)",
+      "Bash(npm run dev:*)",
+      "Bash(source:*)",
+      "Bash(docker ps:*)",
+      "Bash(sudo systemctl status:*)",
+      "Bash(pg_isready:*)",
+      "Bash(python -m polymarket_bot.main:*)",
+      "Bash(pip install:*)",
+      "Bash(python3.12:*)",
+      "Bash(python3.11:*)",
+      "Bash(python3.10:*)",
+      "Bash(sudo apt install:*)",
+      "WebSearch",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(pkill:*)"
     ]
   }
 }

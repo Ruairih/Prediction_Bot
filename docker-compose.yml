@@ -18,6 +18,8 @@ services:
       - ~/.codex:/home/dev/.codex
       - /home/z/Projects/Firinne/Github/PredictionM/nextgen_pipeline/data/guardrail.sqlite:/data/guardrail.sqlite:ro
     ports:
+      - "3000:3000"
+      - "5050:5050"
       - "8000:8000"
       - "8080:8080"
     environment:
@@ -26,6 +28,7 @@ services:
       - SQLITE_SOURCE=/data/guardrail.sqlite
       - NODE_OPTIONS=--dns-result-order=ipv4first
       - ANTHROPIC_TIMEOUT=120000
+      - DASHBOARD_HOST=0.0.0.0
     depends_on:
       postgres:
         condition: service_healthy

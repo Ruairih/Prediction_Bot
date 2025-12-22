@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator, Optional
 
 import asyncpg
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 logger = logging.getLogger(__name__)
 
@@ -19,15 +19,14 @@ logger = logging.getLogger(__name__)
 class DatabaseConfig(BaseModel):
     """PostgreSQL database configuration."""
 
+    model_config = ConfigDict(frozen=True)
+
     url: str = os.environ.get(
         "DATABASE_URL", "postgresql://predict:predict@localhost:5432/predict"
     )
     min_connections: int = 2
     max_connections: int = 10
     command_timeout: float = 60.0
-
-    class Config:
-        frozen = True
 
 
 class Database:

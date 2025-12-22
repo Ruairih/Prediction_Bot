@@ -72,6 +72,53 @@ A **strategy-agnostic trading bot framework** for Polymarket prediction markets.
 
 ---
 
+## Pluggable Strategy Architecture
+
+The bot is **strategy-agnostic**. Strategies are loaded from a registry at startup:
+
+```python
+# Set strategy via environment variable
+STRATEGY_NAME=high_prob_yes python -m polymarket_bot.main
+
+# Or implement your own strategy
+from polymarket_bot.strategies import Strategy, get_default_registry
+
+class MyStrategy(Strategy):
+    @property
+    def name(self) -> str:
+        return "my_strategy"
+
+    def evaluate(self, context: StrategyContext) -> Signal:
+        # Your trading logic here
+        ...
+
+# Register and use
+registry = get_default_registry()
+registry.register(MyStrategy())
+```
+
+### Live Mode Validation
+
+When running in live mode (`DRY_RUN=false`), the bot **fails fast** if:
+- Polymarket API credentials are missing
+- `py-clob-client` is not installed
+- CLOB client initialization fails
+
+This prevents the bot from silently running with mock behavior while thinking it's trading live.
+
+```python
+# Live mode requires:
+# 1. Valid polymarket_api_creds.json
+# 2. py-clob-client installed: pip install py-clob-client
+# 3. CLOB client successfully connects
+
+# Dry run mode (default) works without CLOB client
+DRY_RUN=true python -m polymarket_bot.main  # OK, no CLOB needed
+DRY_RUN=false python -m polymarket_bot.main  # Requires working CLOB
+```
+
+---
+
 ## Dependency Graph & Parallel Build Phases
 
 ```
@@ -437,6 +484,26 @@ See `docs/reference/README.md` for how to use that folder.
 | Telegram Bot | `TELEGRAM_BOT_TOKEN` env var | Alert notifications |
 | Telegram Chat | `TELEGRAM_CHAT_ID` env var | Where to send alerts |
 
+### Environment Variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `DATABASE_URL` | (required) | PostgreSQL connection string |
+| `DRY_RUN` | `true` | Paper trading mode (no real orders) |
+| `STRATEGY_NAME` | `high_prob_yes` | Strategy to use from registry |
+| `PRICE_THRESHOLD` | `0.95` | Price threshold for triggers |
+| `POSITION_SIZE` | `20` | Position size in dollars |
+| `MAX_POSITIONS` | `50` | Maximum concurrent positions |
+| `MIN_BALANCE_RESERVE` | `100` | Minimum balance to keep reserved |
+| `PROFIT_TARGET` | `0.99` | Exit price for long positions |
+| `STOP_LOSS` | `0.90` | Stop loss exit price |
+| `MIN_HOLD_DAYS` | `7` | Days before applying exit strategy |
+| `LOG_LEVEL` | `INFO` | Logging level |
+| `DASHBOARD_ENABLED` | `true` | Enable/disable monitoring dashboard |
+| `DASHBOARD_HOST` | `127.0.0.1` | Dashboard bind address (localhost for security) |
+| `DASHBOARD_PORT` | `5050` | Dashboard HTTP port |
+| `DASHBOARD_API_KEY` | (optional) | API key for dashboard authentication |
+
 ### Setup Instructions
 
 1. **Copy example files:**
@@ -691,6 +758,27 @@ Consider migrating to Alembic when:
 ---
 
 ## Operational Guidelines
+
+### State Rehydration on Startup
+
+When the bot starts, it automatically restores state from the database:
+
+1. **Open Positions**: Loaded from `positions` table
+2. **Open Orders**: Loaded from `orders` table (pending, live, partial statuses)
+3. **Balance Reservations**: Restored for open orders to prevent over-allocation
+
+```python
+# This happens automatically in ExecutionService.load_state()
+await execution_service.load_state()
+# - Refreshes balance from CLOB
+# - Loads open orders and restores reservations
+# - Loads open positions
+```
+
+This ensures the bot can safely restart without losing track of:
+- Pending orders that may fill
+- Positions that need exit monitoring
+- Balance that's reserved for open orders
 
 ### Logging Configuration
 

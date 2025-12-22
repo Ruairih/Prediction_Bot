@@ -193,7 +193,7 @@ CREATE TABLE IF NOT EXISTS approval_alerts (
 
 CREATE TABLE IF NOT EXISTS exit_events (
     id SERIAL PRIMARY KEY,
-    position_id INTEGER NOT NULL,
+    position_id TEXT NOT NULL,  -- Changed from INTEGER to TEXT for UUID compatibility
     token_id TEXT NOT NULL,
     condition_id TEXT,
     exit_type TEXT NOT NULL,

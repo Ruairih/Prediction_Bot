@@ -1,12 +1,42 @@
-# Monitoring Layer - TDD CLAUDE.md
+# Monitoring Layer - CLAUDE.md
 
-> **STATUS: NOT YET IMPLEMENTED**
-> This document contains TDD specifications for future implementation.
-> The test fixtures and examples below are aspirational - adjust as needed during actual implementation.
+> **STATUS: IMPLEMENTED**
+> The monitoring layer is fully implemented with Flask dashboard, metrics collection, and health checking.
+> The React dashboard in `/workspace/dashboard/` provides a modern UI that connects to the Flask API.
 
 ## Purpose
 
 The monitoring layer provides **health checking**, **alerting**, and **observability**. It ensures the system is running correctly and alerts when problems occur.
+
+## Current Implementation
+
+### Flask Dashboard (`dashboard.py`)
+- REST API endpoints at `/health`, `/api/status`, `/api/positions`, `/api/metrics`, `/api/triggers`
+- Thread-safe async dispatch using `run_coroutine_threadsafe()` for asyncpg compatibility
+- Optional API key authentication via `DASHBOARD_API_KEY`
+- SSE endpoint for real-time updates at `/api/stream`
+- Binds to `127.0.0.1` by default for security (configurable via `DASHBOARD_HOST`)
+
+### Metrics Collection (`metrics.py`)
+- `MetricsCollector` class with database queries for win rate, P&L, positions
+- Uses `net_pnl` column consistently for all P&L calculations
+- Async methods for all database operations
+
+### Health Checking (`health_checker.py`)
+- Component health checks for database, WebSocket, balance
+- Aggregated health status with `HEALTHY`, `DEGRADED`, `UNHEALTHY` states
+
+### React Dashboard (`/workspace/dashboard/`)
+- Modern React + TypeScript + TailwindCSS UI
+- React Query for data fetching with caching and auto-refresh
+- Pages: Overview, Positions, Activity, Performance, Strategy, Risk, System
+- Vite dev server with proxy to Flask API
+
+### Threading Model
+The Flask dashboard runs in a **background thread** while the main async event loop runs the bot. This requires:
+- Using `run_coroutine_threadsafe()` to dispatch async database calls to the main loop
+- Proper shutdown handling with `_stop_dashboard()` in main.py
+- Event loop reference passed during Dashboard initialization
 
 ## Dependencies
 

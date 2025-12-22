@@ -19,6 +19,7 @@ The core layer contains the **TradingEngine** that orchestrates everything: rece
 core/
 ├── __init__.py
 ├── engine.py               # Main TradingEngine
+├── background_tasks.py     # BackgroundTasksManager for async loops
 ├── event_processor.py      # Event handling logic
 ├── trigger_tracker.py      # First-trigger deduplication
 ├── watchlist_service.py    # Watchlist re-scoring
@@ -690,8 +691,72 @@ pytest src/polymarket_bot/core/tests/ --cov=src/polymarket_bot/core
 2. `event_processor.py` - Event parsing and filtering
 3. `watchlist_service.py` - Watchlist management
 4. `engine.py` - Main orchestrator (depends on all above)
+5. `background_tasks.py` - Background async task loops
 
 Each module: Write tests first, then implement.
+
+---
+
+## BackgroundTasksManager
+
+The `BackgroundTasksManager` handles periodic async tasks that run independently of the main event loop:
+
+### Tasks Managed
+
+| Task | Interval | Purpose |
+|------|----------|---------|
+| **Watchlist Rescore** | 1 hour | Re-evaluate watchlist entries, promote high-scorers to execution |
+| **Order Sync** | 30 seconds | Sync order status with CLOB, detect fills and partial fills |
+| **Exit Evaluation** | 60 seconds | Check open positions for exit conditions (profit target, stop loss) |
+
+### Usage
+
+```python
+from polymarket_bot.core import BackgroundTasksManager, BackgroundTaskConfig
+
+config = BackgroundTaskConfig(
+    watchlist_rescore_interval_seconds=3600,  # 1 hour
+    watchlist_enabled=True,
+    order_sync_interval_seconds=30,
+    order_sync_enabled=True,
+    exit_eval_interval_seconds=60,
+    exit_eval_enabled=True,
+)
+
+# Price fetcher for exit evaluation (async callback)
+async def fetch_prices(token_ids: list[str]) -> dict[str, Decimal]:
+    prices = {}
+    for token_id in token_ids:
+        price = await rest_client.get_price(token_id)
+        if price:
+            prices[token_id] = price
+    return prices
+
+manager = BackgroundTasksManager(
+    engine=trading_engine,
+    execution_service=execution_service,
+    config=config,
+    price_fetcher=fetch_prices,
+)
+
+await manager.start()
+# ... bot runs ...
+await manager.stop()  # Graceful shutdown
+```
+
+### Key Features
+
+1. **Graceful Shutdown**: Uses `asyncio.Event` for clean task cancellation
+2. **Error Recovery**: Tasks auto-retry on failure with backoff
+3. **Watchlist Promotions**: When rescoring finds entries above threshold, executes via `ExecutionService`
+4. **Partial Fill Detection**: Order sync detects incremental fills and creates positions
+
+### Integration with ExecutionService
+
+The `BackgroundTasksManager` uses `ExecutionService` (not individual managers) for:
+- Order status sync: `execution_service.sync_open_orders()`
+- Exit execution: `execution_service.execute_exit()`
+- Entry execution: `execution_service.execute_entry()` (for watchlist promotions)
 
 ---
 

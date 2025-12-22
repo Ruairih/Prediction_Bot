@@ -2,6 +2,9 @@
 Execution Layer - Order management and position tracking.
 
 This module provides:
+    - ExecutionService: Main facade for trade execution (use this!)
+    - ExecutionConfig: Configuration for execution service
+    - ExecutionResult: Result of execution attempts
     - OrderManager: Submit orders to Polymarket CLOB, track status
     - OrderConfig: Configuration for order submission
     - Order: Order data class
@@ -22,13 +25,30 @@ Critical Gotchas Handled:
 Exit Strategy Logic:
     - Short positions (<7 days): Hold to resolution (99%+ win rate)
     - Long positions (>7 days): Apply profit target (99c) and stop-loss (90c)
+
+Usage:
+    # The ExecutionService is the primary interface for the engine
+    from polymarket_bot.execution import ExecutionService, ExecutionConfig
+
+    service = ExecutionService(db, clob_client, ExecutionConfig())
+    await service.load_state()
+
+    result = await service.execute_entry(signal, context)
 """
+
+# Execution service (main facade - use this!)
+from .service import (
+    ExecutionService,
+    ExecutionConfig,
+    ExecutionResult,
+)
 
 # Balance management (G4 protection)
 from .balance_manager import (
     BalanceManager,
     BalanceConfig,
     InsufficientBalanceError,
+    PreSubmitValidationError,
     Reservation,
 )
 
@@ -55,10 +75,15 @@ from .exit_manager import (
 )
 
 __all__ = [
+    # Execution service (main facade)
+    "ExecutionService",
+    "ExecutionConfig",
+    "ExecutionResult",
     # Balance management (G4 protection)
     "BalanceManager",
     "BalanceConfig",
     "InsufficientBalanceError",
+    "PreSubmitValidationError",
     "Reservation",
     # Order management
     "OrderManager",
