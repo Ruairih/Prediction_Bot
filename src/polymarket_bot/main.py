@@ -181,6 +181,8 @@ class TradingBot:
         self._dashboard_thread = None
         self._flask_server = None
         self._clob_client = None
+        # Tiered Data Architecture
+        self._universe_updater = None
 
     async def start(self, mode: str = "all") -> None:
         """
@@ -213,6 +215,10 @@ class TradingBot:
             # Initialize ingestion AFTER engine is ready
             if mode in ("all", "ingestion"):
                 await self._init_ingestion()
+
+            # Initialize tiered data architecture (universe fetching)
+            if mode in ("all", "ingestion"):
+                await self._init_universe_updater()
 
             if mode in ("all", "monitor"):
                 await self._init_monitoring()
@@ -250,6 +256,12 @@ class TradingBot:
                 await self._background_tasks.stop()
             except Exception as e:
                 logger.warning(f"Error stopping background tasks: {e}")
+
+        if self._universe_updater:
+            try:
+                await self._universe_updater.stop()
+            except Exception as e:
+                logger.warning(f"Error stopping universe updater: {e}")
 
         if self._ingestion:
             try:
@@ -317,6 +329,48 @@ class TradingBot:
 
         await self._ingestion.start()
         logger.info("Ingestion: Started")
+
+    async def _init_universe_updater(self) -> None:
+        """Initialize the tiered data architecture universe updater.
+
+        This background service:
+        - Fetches all ~10k markets from Polymarket every 5 minutes
+        - Computes interestingness scores for strategy-agnostic ranking
+        - Manages tier promotion/demotion (Universe → History → Trades)
+        - Provides market discovery for any strategy
+        """
+        from polymarket_bot.storage.repositories.universe_repo import MarketUniverseRepository
+        from polymarket_bot.storage.repositories.position_repo import PositionRepository
+        from polymarket_bot.storage.repositories.order_repo import LiveOrderRepository
+        from polymarket_bot.ingestion.universe_fetcher import UniverseFetcher, UniverseUpdater
+        from polymarket_bot.core.tier_manager import TierManager
+
+        # Create repositories
+        universe_repo = MarketUniverseRepository(self._db)
+        position_repo = PositionRepository(self._db)
+        order_repo = LiveOrderRepository(self._db)
+
+        # Create tier manager
+        tier_manager = TierManager(
+            universe_repo=universe_repo,
+            position_repo=position_repo,
+            order_repo=order_repo,
+        )
+
+        # Create fetcher
+        fetcher = UniverseFetcher(universe_repo=universe_repo)
+
+        # Create and start updater
+        self._universe_updater = UniverseUpdater(
+            fetcher=fetcher,
+            tier_manager=tier_manager,
+            universe_repo=universe_repo,
+            fetch_interval=300,  # 5 minutes
+            tier_interval=900,   # 15 minutes
+        )
+
+        await self._universe_updater.start()
+        logger.info("Universe Updater: Started (tiered data architecture)")
 
     async def _init_engine(self) -> None:
         """Initialize trading engine with strategy and execution service."""
