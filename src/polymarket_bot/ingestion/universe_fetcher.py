@@ -13,10 +13,32 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import aiohttp
+
+
+def _to_naive_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    """
+    Convert a datetime to naive UTC for PostgreSQL 'timestamp without time zone' columns.
+
+    This fixes the G7 bug: asyncpg cannot insert timezone-aware datetimes into
+    'timestamp without time zone' columns.
+
+    Args:
+        dt: A datetime that may be timezone-aware or naive
+
+    Returns:
+        A naive datetime in UTC, or None if input is None
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        # Convert to UTC then strip timezone
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    # Already naive, assume it's UTC
+    return dt
 
 from polymarket_bot.storage.models import MarketUniverse, OutcomeToken, PriceSnapshot
 
@@ -46,9 +68,12 @@ class UniverseFetcher:
         self.max_pages = max_pages
         self.rate_limit_delay = rate_limit_delay
         self._session: Optional[aiohttp.ClientSession] = None
+        self._closed = False  # Track if close() was called
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create aiohttp session."""
+        if self._closed:
+            raise RuntimeError("UniverseFetcher is closed")
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=30)
@@ -57,8 +82,10 @@ class UniverseFetcher:
 
     async def close(self):
         """Close the session."""
+        self._closed = True
         if self._session and not self._session.closed:
             await self._session.close()
+            self._session = None
 
     async def fetch_all_markets(self) -> list[MarketUniverse]:
         """
@@ -66,49 +93,62 @@ class UniverseFetcher:
 
         Returns list of MarketUniverse objects.
         """
+        if self._closed:
+            logger.warning("Skipping fetch_all_markets: fetcher is closed")
+            return []
+
         session = await self._get_session()
         all_markets = []
         offset = 0
 
-        for page in range(self.max_pages):
-            try:
-                # Fetch page of markets from Gamma API
-                url = f"{GAMMA_API_BASE}/markets"
-                params = {
-                    "limit": self.page_size,
-                    "offset": offset,
-                    "closed": "false",  # Exclude resolved markets initially
-                }
+        try:
+            for page in range(self.max_pages):
+                try:
+                    # Fetch page of markets from Gamma API
+                    url = f"{GAMMA_API_BASE}/markets"
+                    params = {
+                        "limit": self.page_size,
+                        "offset": offset,
+                        "closed": "false",  # Exclude resolved markets initially
+                    }
 
-                async with session.get(url, params=params) as resp:
-                    if resp.status != 200:
-                        logger.warning(f"API returned {resp.status} for page {page}")
+                    async with session.get(url, params=params) as resp:
+                        if resp.status != 200:
+                            logger.warning(f"API returned {resp.status} for page {page}")
+                            break
+
+                        data = await resp.json()
+
+                    if not data:
+                        logger.info(f"No more markets at offset {offset}")
                         break
 
-                    data = await resp.json()
+                    # Parse markets
+                    for item in data:
+                        market = self._parse_market(item)
+                        if market:
+                            all_markets.append(market)
 
-                if not data:
-                    logger.info(f"No more markets at offset {offset}")
+                    logger.debug(f"Fetched page {page + 1}, got {len(data)} markets")
+                    offset += self.page_size
+
+                    # Rate limiting
+                    await asyncio.sleep(self.rate_limit_delay)
+
+                except asyncio.TimeoutError:
+                    logger.warning(f"Timeout fetching page {page}")
+                    await asyncio.sleep(2)
+                except asyncio.CancelledError:
+                    logger.info("fetch_all_markets cancelled")
+                    raise
+                except Exception as e:
+                    logger.error(f"Error fetching page {page}: {e}")
                     break
 
-                # Parse markets
-                for item in data:
-                    market = self._parse_market(item)
-                    if market:
-                        all_markets.append(market)
-
-                logger.debug(f"Fetched page {page + 1}, got {len(data)} markets")
-                offset += self.page_size
-
-                # Rate limiting
-                await asyncio.sleep(self.rate_limit_delay)
-
-            except asyncio.TimeoutError:
-                logger.warning(f"Timeout fetching page {page}")
-                await asyncio.sleep(2)
-            except Exception as e:
-                logger.error(f"Error fetching page {page}: {e}")
-                break
+        except asyncio.CancelledError:
+            # Re-raise after logging - caller should handle cleanup
+            logger.debug("fetch_all_markets operation cancelled")
+            raise
 
         logger.info(f"Fetched {len(all_markets)} markets total")
         return all_markets
@@ -169,21 +209,25 @@ class UniverseFetcher:
                             outcome_index=i,
                         ))
 
-            # Parse end date
+            # Parse end date - normalize to naive UTC for PostgreSQL (G7 fix)
             end_date = None
             end_str = data.get("endDate") or data.get("end_date_iso")
             if end_str:
                 try:
-                    end_date = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+                    end_date = _to_naive_utc(
+                        datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+                    )
                 except ValueError:
                     pass
 
-            # Parse created date
+            # Parse created date - normalize to naive UTC for PostgreSQL (G7 fix)
             created_at = None
             created_str = data.get("createdAt") or data.get("created_at")
             if created_str:
                 try:
-                    created_at = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                    created_at = _to_naive_utc(
+                        datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                    )
                 except ValueError:
                     pass
 
@@ -322,6 +366,10 @@ class UniverseFetcher:
 
     async def fetch_resolved_markets(self) -> list[MarketUniverse]:
         """Fetch recently resolved markets to update resolution status."""
+        if self._closed:
+            logger.warning("Skipping fetch_resolved_markets: fetcher is closed")
+            return []
+
         session = await self._get_session()
         resolved = []
 
@@ -341,6 +389,9 @@ class UniverseFetcher:
                             market.is_resolved = True
                             resolved.append(market)
 
+        except asyncio.CancelledError:
+            logger.debug("fetch_resolved_markets cancelled")
+            raise
         except Exception as e:
             logger.error(f"Error fetching resolved markets: {e}")
 

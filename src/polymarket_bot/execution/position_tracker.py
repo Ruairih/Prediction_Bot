@@ -19,6 +19,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def _format_timestamp(value: datetime) -> str:
+    """Format timestamps consistently for storage."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).strftime(TIMESTAMP_FORMAT)
+
 
 @dataclass
 class Position:
@@ -31,8 +40,18 @@ class Position:
     entry_price: Decimal
     entry_cost: Decimal  # size * entry_price
     entry_time: datetime
+    entry_timestamp: Optional[str] = None
     realized_pnl: Decimal = Decimal("0")
     status: str = "open"  # open, closed
+    # For imported positions, hold_start_at may differ from entry_time
+    # Exit logic uses hold_start_at to determine if 7-day hold has passed
+    hold_start_at: Optional[datetime] = None
+    import_source: Optional[str] = None  # 'bot_trade', 'polymarket_sync', 'manual_import'
+
+    @property
+    def hold_start(self) -> datetime:
+        """Get the effective hold start time for exit logic."""
+        return self.hold_start_at or self.entry_time
 
 
 @dataclass
@@ -177,6 +196,7 @@ class PositionTracker:
                 entry_price=fill_price,
                 entry_cost=fill_size * fill_price,
                 entry_time=now,
+                entry_timestamp=_format_timestamp(now),
             )
 
             self.positions[position_id] = position
@@ -262,6 +282,7 @@ class PositionTracker:
                 entry_price=fill_price,
                 entry_cost=delta_size * fill_price,
                 entry_time=now,
+                entry_timestamp=_format_timestamp(now),
             )
 
             self.positions[position_id] = position
@@ -354,6 +375,7 @@ class PositionTracker:
         position_id: str,
         exit_price: Decimal,
         reason: str,
+        exit_order_id: Optional[str] = None,
     ) -> Optional[ExitEvent]:
         """
         Close a position.
@@ -362,6 +384,7 @@ class PositionTracker:
             position_id: Position to close
             exit_price: Exit price
             reason: Reason for exit (e.g., "profit_target", "stop_loss", "resolution")
+            exit_order_id: Optional order ID used to exit the position
 
         Returns:
             Exit event record
@@ -391,6 +414,7 @@ class PositionTracker:
             hours_held=hours_held,
             reason=reason,
             created_at=now,
+            exit_order_id=exit_order_id,
             status="pending",
         )
 
@@ -408,7 +432,11 @@ class PositionTracker:
         if position.token_id in self._token_positions:
             del self._token_positions[position.token_id]
 
-        await self._save_position(position)
+        await self._save_position(
+            position,
+            exit_timestamp=now,
+            exit_order_id=exit_order_id,
+        )
         await self._save_exit_event(exit_event)
 
         logger.info(
@@ -432,14 +460,42 @@ class PositionTracker:
     async def load_positions(self) -> None:
         """Load positions from database."""
         query = """
-            SELECT id AS position_id, token_id, condition_id, size, entry_price,
-                   entry_cost, entry_timestamp AS entry_time, realized_pnl, status
+            SELECT id::text AS position_id, token_id, condition_id, size, entry_price,
+                   entry_cost, entry_timestamp AS entry_time, realized_pnl, status,
+                   hold_start_at, import_source
             FROM positions
             WHERE status = 'open'
         """
         records = await self._db.fetch(query)
 
+        # Clear existing cache before loading (per Codex recommendation)
+        self.positions.clear()
+        self._token_positions.clear()
+
         for r in records:
+            # Parse entry_time
+            entry_time_raw = r["entry_time"]
+            if isinstance(entry_time_raw, str):
+                entry_time = datetime.fromisoformat(entry_time_raw.replace("Z", "+00:00"))
+            else:
+                entry_time = entry_time_raw
+            if entry_time.tzinfo is None:
+                entry_time = entry_time.replace(tzinfo=timezone.utc)
+            entry_timestamp = (
+                entry_time_raw if isinstance(entry_time_raw, str) else _format_timestamp(entry_time)
+            )
+
+            # Parse hold_start_at (may be None for legacy positions)
+            hold_start_raw = r.get("hold_start_at")
+            hold_start_at = None
+            if hold_start_raw:
+                if isinstance(hold_start_raw, str):
+                    hold_start_at = datetime.fromisoformat(hold_start_raw.replace("Z", "+00:00"))
+                else:
+                    hold_start_at = hold_start_raw
+                if hold_start_at.tzinfo is None:
+                    hold_start_at = hold_start_at.replace(tzinfo=timezone.utc)
+
             position = Position(
                 position_id=r["position_id"],
                 token_id=r["token_id"],
@@ -447,26 +503,46 @@ class PositionTracker:
                 size=Decimal(str(r["size"])),
                 entry_price=Decimal(str(r["entry_price"])),
                 entry_cost=Decimal(str(r["entry_cost"])),
-                entry_time=datetime.fromisoformat(r["entry_time"]) if isinstance(r["entry_time"], str) else r["entry_time"],
+                entry_time=entry_time,
+                entry_timestamp=entry_timestamp,
                 realized_pnl=Decimal(str(r.get("realized_pnl", 0))),
                 status=r["status"],
+                hold_start_at=hold_start_at,
+                import_source=r.get("import_source"),
             )
             self.positions[position.position_id] = position
             self._token_positions[position.token_id] = position.position_id
 
-    async def _save_position(self, position: Position) -> None:
+        logger.info(f"Loaded {len(self.positions)} open positions from database")
+
+    async def _save_position(
+        self,
+        position: Position,
+        *,
+        exit_timestamp: Optional[datetime] = None,
+        exit_order_id: Optional[str] = None,
+    ) -> None:
         """Persist position to database."""
+        entry_timestamp = position.entry_timestamp or _format_timestamp(position.entry_time)
+        position.entry_timestamp = entry_timestamp
+        now_str = _format_timestamp(datetime.now(timezone.utc))
+        exit_timestamp_str = _format_timestamp(exit_timestamp) if exit_timestamp else None
+
         query = """
             INSERT INTO positions
             (token_id, condition_id, size, entry_price, entry_cost,
-             entry_timestamp, realized_pnl, status, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             entry_timestamp, realized_pnl, status, exit_order_id, exit_timestamp,
+             created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT (token_id, entry_timestamp) DO UPDATE
             SET size = $3,
                 entry_price = $4,
                 entry_cost = $5,
                 realized_pnl = $7,
-                status = $8
+                status = $8,
+                exit_order_id = COALESCE($9, exit_order_id),
+                exit_timestamp = COALESCE($10, exit_timestamp),
+                updated_at = $12
         """
         await self._db.execute(
             query,
@@ -475,10 +551,13 @@ class PositionTracker:
             float(position.size),
             float(position.entry_price),
             float(position.entry_cost),
-            position.entry_time.isoformat(),
+            entry_timestamp,
             float(position.realized_pnl),
             position.status,
-            position.entry_time.isoformat(),  # created_at
+            exit_order_id,
+            exit_timestamp_str,
+            entry_timestamp,  # created_at
+            now_str,
         )
 
     async def _save_exit_event(self, event: ExitEvent) -> None:
@@ -492,7 +571,7 @@ class PositionTracker:
         """
         await self._db.execute(
             query,
-            event.position_id,  # Note: schema expects INTEGER but we use string
+            event.position_id,
             event.token_id,
             event.condition_id,
             event.exit_type,
@@ -505,5 +584,5 @@ class PositionTracker:
             event.exit_order_id,
             event.status,
             event.reason,
-            event.created_at.isoformat(),
+            _format_timestamp(event.created_at),
         )

@@ -270,9 +270,16 @@ class BalanceManager:
             return Decimal("0")
 
         try:
-            result = self._clob_client.get_balance()
-            balance_str = result.get("USDC", "0")
-            balance = Decimal(str(balance_str))
+            # py-clob-client uses get_balance_allowance for USDC balance
+            from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+
+            params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            result = self._clob_client.get_balance_allowance(params)
+
+            # Result contains 'balance' field (in USDC units with 6 decimals)
+            balance_str = result.get("balance", "0")
+            # Convert from micro-units (6 decimals) to USDC
+            balance = Decimal(str(balance_str)) / Decimal("1000000")
 
             # Cache the result
             self._cached_balance = balance

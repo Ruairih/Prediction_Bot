@@ -548,3 +548,35 @@ async def process_price_update(self, update: PriceUpdate) -> ProcessedEvent:
 
 - `TestConcurrentProcessing` - Tests for lock-during-I/O fix
 - Tests verify concurrent processing is faster than sequential
+
+### Startup Performance Fix (G8: Startup Hang)
+
+**Problem:** `IngestionService.start()` blocked for 30+ seconds while fetching ALL ~10,000 markets from the Polymarket API synchronously. This made the bot appear frozen during startup.
+
+**Solution:** Added `startup_market_limit` config and background market fetching in `service.py`:
+
+```python
+@dataclass
+class IngestionConfig:
+    # ... other config ...
+
+    # Startup performance: limit initial market fetch to avoid blocking startup
+    # for 30+ seconds. Background task handles remaining markets.
+    startup_market_limit: int = 2000  # Fetch first 2000 markets on startup (~6s)
+```
+
+**Key changes:**
+1. `_refresh_markets()` now caps at `startup_market_limit` (default 2000)
+2. New `_background_fetch_remaining_markets()` continues fetching after startup
+3. Background task subscribes to new tokens incrementally
+4. WebSocket `subscribe()` queues tokens even when disconnected
+
+**Behavior:**
+- Startup: ~1-2 seconds (fetch 2000 markets)
+- Background: Remaining ~8000 markets fetched over ~30 seconds
+- All markets eventually subscribed via background task
+
+**Config options:**
+- `startup_market_limit=0`: Skip startup fetch entirely (background only)
+- `startup_market_limit=10000`: Fetch all at startup (old behavior)
+- `subscribe_all_markets=True`: Required for background fetch to run

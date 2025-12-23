@@ -14,6 +14,11 @@ RUN apt-get update && apt-get install -y \
     postgresql-client \
     redis-tools \
     sqlite3 \
+    # Process management - required for Claude Code's Kill Shell feature
+    procps \
+    # Debugging utilities
+    lsof \
+    net-tools \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @anthropic-ai/claude-code @openai/codex

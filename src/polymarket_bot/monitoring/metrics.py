@@ -257,8 +257,11 @@ class MetricsCollector:
             return Decimal("0")
 
         try:
-            result = self._clob_client.get_balance()
-            return Decimal(str(result.get("USDC", "0")))
+            from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+            params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            result = self._clob_client.get_balance_allowance(params)
+            balance_raw = Decimal(str(result.get("balance", "0")))
+            return balance_raw / Decimal("1000000")  # Convert from micro-units
         except Exception as e:
             logger.error(f"Failed to get balance: {e}")
             return Decimal("0")

@@ -44,8 +44,8 @@ dev = [
     "mypy>=1.0.0",
 ]
 dashboard = [
-    "fastapi>=0.100.0",
-    "uvicorn>=0.23.0",
+    "flask>=3.0.0",
+    "werkzeug>=3.0.0",
 ]
 all = [
     "polymarket-bot[dev,dashboard]",

@@ -34,14 +34,16 @@ class TriggerRepository(BaseRepository[PolymarketFirstTrigger]):
         """
         Record a new trigger event.
 
-        Uses ON CONFLICT to ensure (token_id, threshold) uniqueness.
+        Uses ON CONFLICT to ensure (token_id, condition_id, threshold) uniqueness.
+        This is the G2 gotcha fix - prevents duplicate trades when multiple
+        token_ids map to the same condition.
         """
         query = """
             INSERT INTO polymarket_first_triggers
             (token_id, condition_id, threshold, trigger_timestamp, price, size,
              created_at, model_score, model_version, outcome, outcome_index)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-            ON CONFLICT (token_id, threshold) DO NOTHING
+            ON CONFLICT (token_id, condition_id, threshold) DO NOTHING
             RETURNING *
         """
         record = await self.db.fetchrow(
@@ -60,13 +62,21 @@ class TriggerRepository(BaseRepository[PolymarketFirstTrigger]):
         )
         return self._record_to_model(record) if record else trigger
 
-    async def has_triggered(self, token_id: str, threshold: float) -> bool:
-        """Check if this token has already triggered at this threshold."""
+    async def has_triggered(
+        self, token_id: str, condition_id: str, threshold: float
+    ) -> bool:
+        """
+        Check if this exact token+condition has already triggered at this threshold.
+
+        Must include condition_id to match the PK (token_id, condition_id, threshold).
+        Without condition_id, migrated rows with empty condition_id could cause
+        false suppressions for new triggers with actual condition_ids.
+        """
         query = """
             SELECT 1 FROM polymarket_first_triggers
-            WHERE token_id = $1 AND threshold = $2
+            WHERE token_id = $1 AND condition_id = $2 AND threshold = $3
         """
-        result = await self.db.fetchval(query, token_id, threshold)
+        result = await self.db.fetchval(query, token_id, condition_id, threshold)
         return result is not None
 
     async def has_condition_triggered(
@@ -91,15 +101,18 @@ class TriggerRepository(BaseRepository[PolymarketFirstTrigger]):
         """
         Check if a new trigger should be created.
 
-        Returns True only if NEITHER the token_id NOR the condition_id
-        has triggered at this threshold.
+        Returns True only if:
+        1. This exact (token_id, condition_id, threshold) doesn't exist
+        2. No other token for this condition_id has triggered at this threshold (G2)
 
         This is the safe way to check before creating a trigger.
         """
-        token_triggered = await self.has_triggered(token_id, threshold)
+        # Check exact match first (handles the PK correctly)
+        token_triggered = await self.has_triggered(token_id, condition_id, threshold)
         if token_triggered:
             return False
 
+        # G2 protection: check if any OTHER token for this condition triggered
         condition_triggered = await self.has_condition_triggered(condition_id, threshold)
         return not condition_triggered
 

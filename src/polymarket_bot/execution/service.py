@@ -371,12 +371,7 @@ class ExecutionService:
                             f"+{new_filled} (total: {updated.filled_size}/{updated.size})"
                         )
 
-                    # Adjust balance reservation for partial fills
-                    if updated.status == OrderStatus.PARTIAL:
-                        self._balance_manager.adjust_reservation_for_partial_fill(
-                            order_id=order.order_id,
-                            filled_amount=new_filled * updated.price,
-                        )
+                    # Reservation adjustments are handled in OrderManager.sync_order_status
 
             except Exception as e:
                 logger.error(f"Error syncing order {order.order_id}: {e}")

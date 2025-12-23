@@ -215,7 +215,7 @@ class ExitEventRepository(BaseRepository[ExitEvent]):
         records = await self.db.fetch(query)
         return self._records_to_models(records)
 
-    async def get_by_position(self, position_id: int) -> list[ExitEvent]:
+    async def get_by_position(self, position_id: str) -> list[ExitEvent]:
         """Get exit events for a position."""
         query = """
             SELECT * FROM exit_events

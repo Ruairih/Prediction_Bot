@@ -200,7 +200,62 @@ class TestPositionClosure:
 
         # Entry: 0.95, Exit: 0.99, Size: 20
         # PnL = 20 * (0.99 - 0.95) = $0.80
-        assert exit_event.realized_pnl == Decimal("0.80")
+        assert exit_event.net_pnl == Decimal("0.80")
+
+    @pytest.mark.asyncio
+    async def test_persists_exit_metadata(self, position_tracker, mock_db, sample_position):
+        """Should persist exit_order_id and exit_timestamp when closing."""
+        position_tracker.positions[sample_position.position_id] = sample_position
+
+        exit_order_id = "exit_order_123"
+        await position_tracker.close_position(
+            sample_position.position_id,
+            exit_price=Decimal("0.99"),
+            reason="profit_target",
+            exit_order_id=exit_order_id,
+        )
+
+        position_call = None
+        for call in mock_db.execute.call_args_list:
+            if "INSERT INTO positions" in call.args[0]:
+                position_call = call
+                break
+
+        assert position_call is not None
+        assert position_call.args[9] == exit_order_id
+        assert isinstance(position_call.args[10], str)
+        assert position_call.args[10].endswith("Z")
+
+
+class TestPositionLoading:
+    """Tests for loading positions from storage."""
+
+    @pytest.mark.asyncio
+    async def test_normalizes_naive_timestamps(self, position_tracker, mock_db):
+        """Should normalize naive timestamps to UTC."""
+        mock_db.fetch.return_value = [
+            {
+                "position_id": "1",
+                "token_id": "tok_yes_abc",
+                "condition_id": "0x123",
+                "size": 10,
+                "entry_price": 0.95,
+                "entry_cost": 9.5,
+                "entry_time": "2025-01-01T00:00:00",
+                "realized_pnl": 0,
+                "status": "open",
+                "hold_start_at": "2025-01-02T00:00:00",
+                "import_source": None,
+            }
+        ]
+
+        await position_tracker.load_positions()
+
+        position = position_tracker.get_position("1")
+        assert position is not None
+        assert position.entry_time.tzinfo == timezone.utc
+        assert position.hold_start_at is not None
+        assert position.hold_start_at.tzinfo == timezone.utc
 
 
 class TestPositionRetrieval:

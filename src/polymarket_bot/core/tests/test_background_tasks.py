@@ -28,6 +28,7 @@ def mock_engine():
     """Mock TradingEngine."""
     engine = MagicMock()
     engine.rescore_watchlist = AsyncMock(return_value=[])
+    engine.execute_watchlist_promotion = AsyncMock()
     engine.config = MagicMock(
         dry_run=False,
         position_size=20,
@@ -40,6 +41,7 @@ def mock_engine_dry_run():
     """Mock TradingEngine in dry run mode."""
     engine = MagicMock()
     engine.rescore_watchlist = AsyncMock(return_value=[])
+    engine.execute_watchlist_promotion = AsyncMock()
     engine.config = MagicMock(
         dry_run=True,
         position_size=20,
@@ -311,7 +313,7 @@ class TestDryRunVsLiveMode:
     async def test_dry_run_logs_but_does_not_execute(
         self, mock_engine_dry_run, mock_execution_service, mock_promotion
     ):
-        """In dry run mode, promotions should be logged but not executed."""
+        """In dry run mode, promotions should be routed through the engine."""
         mock_engine_dry_run.rescore_watchlist = AsyncMock(return_value=[mock_promotion])
 
         config = BackgroundTaskConfig(
@@ -327,17 +329,11 @@ class TestDryRunVsLiveMode:
             config=config,
         )
 
-        with patch("polymarket_bot.core.background_tasks.logger") as mock_logger:
-            await manager.start()
-            await asyncio.sleep(0.15)  # Let one rescore cycle run
-            await manager.stop()
+        await manager.start()
+        await asyncio.sleep(0.15)  # Let one rescore cycle run
+        await manager.stop()
 
-            # Should log dry run message
-            assert any(
-                "DRY RUN" in str(call)
-                for call in mock_logger.info.call_args_list
-            )
-
+        mock_engine_dry_run.execute_watchlist_promotion.assert_called()
         # Should NOT have called execute_entry
         mock_execution_service.execute_entry.assert_not_called()
 
@@ -345,11 +341,8 @@ class TestDryRunVsLiveMode:
     async def test_live_mode_executes_promotions(
         self, mock_engine, mock_execution_service, mock_promotion
     ):
-        """In live mode, promotions should be executed via ExecutionService."""
+        """In live mode, promotions should be routed via the engine."""
         mock_engine.rescore_watchlist = AsyncMock(return_value=[mock_promotion])
-        mock_execution_service.execute_entry = AsyncMock(
-            return_value=MagicMock(success=True, order_id="order_123")
-        )
 
         config = BackgroundTaskConfig(
             watchlist_rescore_interval_seconds=0.05,
@@ -368,8 +361,8 @@ class TestDryRunVsLiveMode:
         await asyncio.sleep(0.15)  # Let one rescore cycle run
         await manager.stop()
 
-        # Should have called execute_entry
-        mock_execution_service.execute_entry.assert_called()
+        mock_engine.execute_watchlist_promotion.assert_called()
+        mock_execution_service.execute_entry.assert_not_called()
 
 
 # =============================================================================

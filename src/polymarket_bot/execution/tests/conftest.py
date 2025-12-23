@@ -50,10 +50,10 @@ def mock_clob_client():
     # Use spec to limit attributes and avoid hasattr issues
     # Only define the methods we actually use
     class CLOBClientSpec:
-        def create_order(self, **kwargs):
+        def create_and_post_order(self, order_args):
             pass
 
-        def get_balance(self):
+        def get_balance_allowance(self, params):
             pass
 
         def get_order(self, order_id):
@@ -65,14 +65,15 @@ def mock_clob_client():
     client = MagicMock(spec=CLOBClientSpec)
 
     # Mock successful order creation
-    client.create_order.return_value = {
+    client.create_and_post_order.return_value = {
         "orderID": "order_123",
         "status": "LIVE",
     }
 
-    # Mock balance check
-    client.get_balance.return_value = {
-        "USDC": "1000.00",
+    # Mock balance check - returns balance in micro-units (6 decimals)
+    # 1000 USDC = 1000000000 micro-units
+    client.get_balance_allowance.return_value = {
+        "balance": "1000000000",  # 1000 USDC in micro-units
     }
 
     # Mock order status
@@ -94,8 +95,8 @@ def mock_clob_client():
 def mock_clob_insufficient_balance():
     """Mock CLOB client with insufficient balance."""
     client = MagicMock()
-    client.get_balance.return_value = {"USDC": "5.00"}
-    client.create_order.side_effect = Exception("Insufficient balance")
+    client.get_balance_allowance.return_value = {"balance": "5000000"}  # 5 USDC
+    client.create_and_post_order.side_effect = Exception("Insufficient balance")
     return client
 
 
@@ -103,8 +104,8 @@ def mock_clob_insufficient_balance():
 def mock_clob_partial_fill():
     """Mock CLOB client with partial fill."""
     client = MagicMock()
-    client.get_balance.return_value = {"USDC": "1000.00"}
-    client.create_order.return_value = {"orderID": "order_partial", "status": "LIVE"}
+    client.get_balance_allowance.return_value = {"balance": "1000000000"}  # 1000 USDC
+    client.create_and_post_order.return_value = {"orderID": "order_partial", "status": "LIVE"}
     client.get_order.return_value = {
         "orderID": "order_partial",
         "status": "LIVE",

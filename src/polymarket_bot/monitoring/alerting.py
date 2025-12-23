@@ -160,7 +160,7 @@ Cost: ${float(price * size):.2f}
     def alert_health_issue(
         self,
         component: str,
-        status: str,
+        status,  # Can be HealthStatus enum or string
         message: str,
     ) -> bool:
         """
@@ -168,18 +168,21 @@ Cost: ${float(price * size):.2f}
 
         Args:
             component: Component name (database, websocket, etc.)
-            status: Health status (UNHEALTHY, DEGRADED, etc.)
+            status: Health status (UNHEALTHY, DEGRADED, etc.) - can be HealthStatus enum or string
             message: Description of the issue
 
         Returns:
             True if sent
         """
-        emoji = "🔴" if status.upper() == "UNHEALTHY" else "🟡"
+        # Handle both HealthStatus enum and string
+        status_str = str(status.value if hasattr(status, 'value') else status).upper()
+
+        emoji = "🔴" if status_str == "UNHEALTHY" else "🟡"
         title = f"{emoji} Health Issue: {component}"
 
         formatted_message = f"""
 Component: {component}
-Status: {status}
+Status: {status_str}
 Details: {message}
 Time: {datetime.now(timezone.utc).isoformat()}
 """
@@ -187,9 +190,9 @@ Time: {datetime.now(timezone.utc).isoformat()}
         return self.send_alert(
             title=title,
             message=formatted_message,
-            dedup_key=f"health_{component}_{status}",
+            dedup_key=f"health_{component}_{status_str}",
             cooldown_seconds=300,  # 5 minute cooldown
-            priority="high" if status.upper() == "UNHEALTHY" else "normal",
+            priority="high" if status_str == "UNHEALTHY" else "normal",
         )
 
     def alert_low_balance(

@@ -78,13 +78,15 @@ execution/
 ├── position_tracker.py     # Position management
 ├── exit_manager.py         # Exit strategy execution
 ├── balance_manager.py      # USDC balance tracking
+├── position_sync.py        # Sync positions from Polymarket to DB
 ├── tests/
 │   ├── __init__.py
 │   ├── conftest.py
 │   ├── test_order_manager.py
 │   ├── test_position_tracker.py
 │   ├── test_exit_manager.py
-│   └── test_balance_manager.py
+│   ├── test_balance_manager.py
+│   └── test_position_sync.py
 └── CLAUDE.md               # This file
 ```
 
@@ -1058,3 +1060,101 @@ async def sync_open_orders(self) -> int:
         if new_filled > Decimal("0"):
             await self._position_tracker.record_fill(updated)
 ```
+
+---
+
+## Position Sync Service (`position_sync.py`)
+
+The Position Sync Service handles importing existing Polymarket positions into the bot's database. This is critical for:
+- Onboarding existing positions that were created outside the bot
+- Detecting positions closed externally
+- Keeping the database in sync with actual Polymarket state
+
+### Key Design Decision: hold_start_at vs entry_timestamp
+
+**Critical Gotcha: The Polymarket positions API does NOT return purchase timestamps.**
+
+The API only returns current position state (size, avg_price, unrealized P&L) but not WHEN the position was opened. This created a bug where:
+- Imported positions got `hold_start_at = NOW`
+- Positions that were actually 25 days old appeared as 0 days old
+- Exit logic (7-day hold period) was incorrectly applied
+
+**Solution:** Fetch trade history from the trades API to get actual purchase timestamps.
+
+### Hold Policies
+
+```python
+# "new" - Default, safe option for fresh imports
+# Sets hold_start_at to NOW, giving 7-day hold period
+result = await sync_service.sync_positions(
+    wallet_address="0x...",
+    hold_policy="new"
+)
+
+# "mature" - Backdates hold_start, exit logic applies immediately
+result = await sync_service.sync_positions(
+    wallet_address="0x...",
+    hold_policy="mature",
+    mature_days=8  # Backdate 8 days
+)
+
+# "actual" - Uses real trade timestamps from trade history
+# RECOMMENDED for accurate exit logic
+result = await sync_service.sync_positions(
+    wallet_address="0x...",
+    hold_policy="actual"
+)
+```
+
+### Correcting Existing Positions
+
+For positions already imported with wrong timestamps:
+
+```python
+# Dry run first
+result = await sync_service.correct_hold_timestamps(
+    wallet_address="0x...",
+    dry_run=True
+)
+print(f"Would correct {result['corrected']} positions")
+
+# Apply corrections
+result = await sync_service.correct_hold_timestamps(
+    wallet_address="0x...",
+    dry_run=False
+)
+```
+
+### Usage Example
+
+```python
+from polymarket_bot.execution.position_sync import PositionSyncService
+
+sync_service = PositionSyncService(db, position_tracker)
+
+# Dry run to see what would change
+result = await sync_service.sync_positions(
+    wallet_address="0x...",
+    dry_run=True,
+    hold_policy="actual"
+)
+print(f"Would import: {result.positions_imported}")
+print(f"Would update: {result.positions_updated}")
+print(f"Would close: {result.positions_closed}")
+
+# Actual sync
+result = await sync_service.sync_positions(
+    wallet_address="0x...",
+    dry_run=False,
+    hold_policy="actual"
+)
+```
+
+### Safety Features
+
+1. **Partial Response Guard**: If API returns invalid/partial data, close detection is skipped
+2. **Empty Response Guard**: If API returns 0 positions but DB has many, skips close detection
+3. **Idempotent**: Safe to run multiple times
+4. **Audit Trail**: All sync operations logged to `positions_sync_log` table
+5. **Cache Refresh**: Automatically refreshes PositionTracker cache after sync
+6. **Full Reconciliation**: Compares all open positions regardless of `import_source`

@@ -33,6 +33,7 @@ from polymarket_bot.strategies import (
     Signal,
     SignalType,
     Strategy,
+    StrategyContext,
     WatchlistSignal,
 )
 
@@ -318,16 +319,32 @@ class TradingEngine:
         Handle an entry signal.
 
         G5: Verifies orderbook before executing.
-        G2: Uses atomic trigger recording to prevent TOCTOU races.
+        G2: Uses atomic trigger recording to prevent TOCTOU races (live mode only).
 
-        CRITICAL FIX: Trigger is now recorded AFTER successful execution,
-        not before. This prevents blocking future retries if execution fails.
+        DRY RUN MODE: Does read-only dedup checks without recording triggers.
+        This allows repeated signals for validation without blocking conditions.
+
+        LIVE MODE: Uses atomic check-and-record before execution.
+        On PreSubmitValidationError, removes trigger to allow retry.
+        On other errors, keeps trigger (order may have been placed).
 
         Args:
             signal: The entry signal
             context: Strategy context
             event: Original event
         """
+        if self._execution_service and self.config.max_positions is not None:
+            open_positions = len(
+                self._execution_service.position_tracker.get_open_positions()
+            )
+            if open_positions >= self.config.max_positions:
+                self._stats.filters_rejected += 1
+                logger.warning(
+                    f"Max positions reached ({open_positions}/{self.config.max_positions}), "
+                    f"skipping entry for {context.token_id}"
+                )
+                return
+
         # G5: Verify orderbook matches trigger price
         if self.config.verify_orderbook and self._api_client:
             is_valid = await self._verify_orderbook(
@@ -341,9 +358,37 @@ class TradingEngine:
                 )
                 return
 
-        # G2 FIX: Use atomic check to prevent TOCTOU race
-        # We check atomically but DON'T record yet - only record after successful execution
-        # This allows retries if execution fails
+        # DRY RUN: Skip trigger recording entirely to allow repeated signals
+        # This helps validate the bot is working without any DB writes
+        if self.config.dry_run:
+            # Just check if this would be a first trigger (read-only)
+            is_first = await self._trigger_tracker.is_first_trigger(
+                token_id=context.token_id,
+                condition_id=context.condition_id,
+                threshold=self.config.price_threshold,
+            )
+            # Also check condition-level (G2)
+            if is_first:
+                condition_triggered = await self._trigger_tracker.has_condition_triggered(
+                    condition_id=context.condition_id,
+                    threshold=self.config.price_threshold,
+                )
+                is_first = not condition_triggered
+
+            if not is_first:
+                logger.debug(
+                    f"DRY RUN: Would skip duplicate for {context.token_id}"
+                )
+                return
+
+            self._stats.dry_run_signals += 1
+            logger.info(
+                f"DRY RUN: Would buy {signal.size} of {signal.token_id} "
+                f"@ {signal.price} ({signal.reason})"
+            )
+            return
+
+        # LIVE MODE: Use atomic check-and-record to prevent TOCTOU race
         is_first = await self._trigger_tracker.try_record_trigger_atomic(
             token_id=context.token_id,
             condition_id=context.condition_id,
@@ -362,48 +407,37 @@ class TradingEngine:
             )
             return
 
-        # Execute or dry run
-        # CRITICAL FIX: Trigger was recorded atomically above to claim it,
-        # but if execution fails, we should allow retry by removing the trigger.
-        # For now, trigger is recorded before execution to prevent concurrent claims.
-        # A more sophisticated approach would use a "pending" state.
-        if self.config.dry_run:
-            self._stats.dry_run_signals += 1
+        # Execute the trade
+        try:
+            await self._execute_entry(signal, context)
+            self._stats.entries_executed += 1
             logger.info(
-                f"DRY RUN: Would buy {signal.size} of {signal.token_id} "
-                f"@ {signal.price} ({signal.reason})"
+                f"Successfully executed entry for {context.token_id}"
             )
-        else:
-            try:
-                await self._execute_entry(signal, context)
-                self._stats.entries_executed += 1
-                logger.info(
-                    f"Successfully executed entry for {context.token_id}"
-                )
-            except PreSubmitValidationError as e:
-                # Pre-execution validation errors - safe to retry
-                # These errors occur BEFORE order submission (price/balance checks)
-                await self._trigger_tracker.remove_trigger(
-                    token_id=context.token_id,
-                    condition_id=context.condition_id,
-                    threshold=self.config.price_threshold,
-                )
-                logger.warning(
-                    f"Pre-submit validation failed for {context.token_id}: {e}. "
-                    f"Trigger removed to allow retry."
-                )
-                raise
-            except Exception as e:
-                # Other errors - order may have been submitted
-                # DON'T remove trigger to prevent duplicate orders
-                # Manual intervention may be needed
-                logger.error(
-                    f"Execution error for {context.token_id}: {e}. "
-                    f"Trigger NOT removed (order may have been placed). "
-                    f"Manual review recommended."
-                )
-                self._stats.errors += 1
-                raise
+        except PreSubmitValidationError as e:
+            # Pre-execution validation errors - safe to retry
+            # These errors occur BEFORE order submission (price/balance checks)
+            await self._trigger_tracker.remove_trigger(
+                token_id=context.token_id,
+                condition_id=context.condition_id,
+                threshold=self.config.price_threshold,
+            )
+            logger.warning(
+                f"Pre-submit validation failed for {context.token_id}: {e}. "
+                f"Trigger removed to allow retry."
+            )
+            raise
+        except Exception as e:
+            # Other errors - order may have been submitted
+            # DON'T remove trigger to prevent duplicate orders
+            # Manual intervention may be needed
+            logger.error(
+                f"Execution error for {context.token_id}: {e}. "
+                f"Trigger NOT removed (order may have been placed). "
+                f"Manual review recommended."
+            )
+            self._stats.errors += 1
+            raise
 
     async def _handle_exit(
         self,
@@ -606,3 +640,47 @@ class TradingEngine:
             List of promotions to execute
         """
         return await self._watchlist_service.rescore_all()
+
+    async def execute_watchlist_promotion(self, promotion: Any) -> None:
+        """
+        Execute a watchlist promotion through standard entry safeguards.
+
+        Args:
+            promotion: Watchlist promotion entry
+        """
+        entry = await self._watchlist_service.get_entry(promotion.token_id)
+        if not entry:
+            logger.warning(
+                f"Watchlist promotion for {promotion.token_id} has no entry; skipping"
+            )
+            return
+
+        trigger_price = (
+            entry.trigger_price
+            if entry.trigger_price and entry.trigger_price > 0
+            else self.config.price_threshold
+        )
+        signal = EntrySignal(
+            reason=f"Watchlist promotion (score={promotion.new_score:.2f})",
+            token_id=promotion.token_id,
+            side="BUY",
+            price=trigger_price,
+            size=Decimal(str(self.config.position_size)),
+        )
+
+        context = StrategyContext(
+            condition_id=entry.condition_id or getattr(promotion, "condition_id", ""),
+            token_id=promotion.token_id,
+            question=entry.question or "",
+            category=None,
+            trigger_price=trigger_price,
+            trade_size=None,
+            time_to_end_hours=entry.time_to_end_hours
+            or getattr(promotion, "time_to_end_hours", 24.0),
+            trade_age_seconds=0.0,
+            model_score=promotion.new_score,
+            outcome=getattr(promotion, "outcome", None),
+            outcome_index=getattr(promotion, "outcome_index", None),
+        )
+
+        await self._handle_entry(signal, context, event={"source": "watchlist"})

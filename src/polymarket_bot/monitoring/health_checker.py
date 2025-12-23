@@ -200,8 +200,11 @@ class HealthChecker:
             )
 
         try:
-            result = self._clob_client.get_balance()
-            balance = Decimal(str(result.get("USDC", "0")))
+            from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+            params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            result = self._clob_client.get_balance_allowance(params)
+            balance_raw = Decimal(str(result.get("balance", "0")))
+            balance = balance_raw / Decimal("1000000")  # Convert from micro-units
 
             if balance >= min_balance:
                 return ComponentHealth(

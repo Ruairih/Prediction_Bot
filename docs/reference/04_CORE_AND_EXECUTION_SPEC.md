@@ -771,7 +771,7 @@ class ExitType(str, Enum):
 @dataclass
 class ExitSignal:
     """Signal to exit a position."""
-    position_id: int
+    position_id: str  # Stored as text for UUID/string compatibility
     exit_type: ExitType
     trigger_price: float
     reason: str
@@ -854,7 +854,7 @@ class ExitManager:
         # Check profit target
         if current_price >= self.config.profit_target_price:
             return ExitSignal(
-                position_id=position.id,
+                position_id=str(position.id),
                 exit_type=ExitType.PROFIT_TARGET,
                 trigger_price=current_price,
                 reason=f"price={current_price:.4f}>={self.config.profit_target_price}",
@@ -863,7 +863,7 @@ class ExitManager:
         # Check stop loss
         if current_price <= self.config.stop_loss_price:
             return ExitSignal(
-                position_id=position.id,
+                position_id=str(position.id),
                 exit_type=ExitType.STOP_LOSS,
                 trigger_price=current_price,
                 reason=f"price={current_price:.4f}<={self.config.stop_loss_price}",
@@ -884,7 +884,7 @@ class ExitManager:
         order_manager: "OrderManager",
     ) -> bool:
         """Execute an exit signal."""
-        position = self.position_repo.get_by_id(signal.position_id)
+        position = self.position_repo.get_by_id(int(signal.position_id))
         if not position:
             logger.warning(f"Position {signal.position_id} not found")
             return False

@@ -154,6 +154,50 @@ async with db.transaction() as conn:
     await conn.execute("UPDATE daily_pnl ...")
 ```
 
+### Database Reconnection
+
+The database layer includes automatic reconnection with exponential backoff:
+
+```python
+# Configure reconnection behavior
+config = DatabaseConfig(
+    url="postgresql://predict:predict@localhost:5433/predict",
+    reconnect_max_attempts=5,      # Max reconnect attempts
+    reconnect_initial_delay=1.0,   # Initial delay (seconds)
+    reconnect_max_delay=60.0,      # Max delay between attempts
+    reconnect_multiplier=2.0,      # Exponential backoff multiplier
+)
+
+# Ensure healthy (reconnects if needed)
+if await db.ensure_healthy():
+    print("Database is healthy")
+else:
+    print("Database unreachable after all reconnect attempts")
+```
+
+---
+
+## Database Bootstrap
+
+Use the bootstrap script for initial setup:
+
+```bash
+# Full bootstrap with database creation
+./scripts/bootstrap_db.sh --create-db
+
+# Apply migrations only (database must exist)
+./scripts/bootstrap_db.sh
+
+# Check schema without modifying
+./scripts/bootstrap_db.sh --check
+```
+
+The bootstrap script:
+1. Creates database if `--create-db` is specified
+2. Applies all `seed/*.sql` migrations in order
+3. Verifies required tables and columns exist
+4. Checks primary key constraints are correct
+
 ---
 
 ## Testing

@@ -21,6 +21,7 @@ import asyncio
 import inspect
 import logging
 import signal
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -76,6 +77,10 @@ class IngestionConfig:
 
     # Health check
     max_message_age_seconds: float = 60.0
+
+    # Startup performance: limit initial market fetch to avoid blocking startup
+    # for 30+ seconds. UniverseUpdater handles full market discovery.
+    startup_market_limit: int = 2000  # Fetch first 2000 markets on startup (20 API calls ~6s)
 
 
 @dataclass
@@ -177,9 +182,13 @@ class IngestionService:
         self._dashboard_app = None
         self._dashboard_task: Optional[asyncio.Task] = None
 
+        # Background market fetch task (for remaining markets after startup)
+        self._background_market_task: Optional[asyncio.Task] = None
+
         # Market data
         self._markets_cache: dict[str, Any] = {}
         self._token_to_market: dict[str, str] = {}
+        self._initial_fetch_complete = False  # Track if startup fetch hit limit
 
     @property
     def state(self) -> ServiceState:
@@ -308,6 +317,15 @@ class IngestionService:
             # Setup signal handlers
             self._setup_signal_handlers()
 
+            # If subscribe_all_markets is True, launch background task to
+            # fetch and subscribe to remaining markets (runs even if startup
+            # limit=0 or errors occurred - allows recovery)
+            if self._config.subscribe_all_markets:
+                self._background_market_task = asyncio.create_task(
+                    self._background_fetch_remaining_markets()
+                )
+                logger.info("Started background task for remaining market subscriptions")
+
         except Exception as e:
             logger.error(f"Failed to start ingestion service: {e}")
             self._state = ServiceState.FAILED
@@ -341,6 +359,15 @@ class IngestionService:
 
     async def _cleanup(self) -> None:
         """Clean up resources."""
+        # Cancel background market fetch task
+        if self._background_market_task:
+            self._background_market_task.cancel()
+            try:
+                await self._background_market_task
+            except asyncio.CancelledError:
+                pass
+            self._background_market_task = None
+
         # Stop WebSocket
         if self._websocket:
             try:
@@ -392,7 +419,7 @@ class IngestionService:
             subscribed = len(self._websocket.subscribed_tokens)
             if self._websocket.last_message_time:
                 last_msg_age = (
-                    asyncio.get_event_loop().time() -
+                    time.time() -
                     self._websocket.last_message_time
                 )
 
@@ -502,24 +529,60 @@ class IngestionService:
                 component="websocket",
             )
 
-    async def _refresh_markets(self) -> None:
-        """Fetch and cache market data with pagination."""
+    async def _refresh_markets(self) -> int:
+        """
+        Fetch and cache market data with pagination.
+
+        Uses startup_market_limit to avoid blocking startup for 30+ seconds.
+        Background task handles remaining markets if limit is hit.
+
+        Returns:
+            The offset where fetching stopped (for background continuation)
+        """
         if not self._rest_client:
-            return
+            return 0
+
+        self._initial_fetch_complete = False
 
         try:
             self._markets_cache.clear()
             self._token_to_market.clear()
 
-            # Paginate through all markets
+            # Paginate through markets up to startup limit
             offset = 0
             limit = 100
             total_fetched = 0
+            startup_limit = max(0, self._config.startup_market_limit)  # Ensure non-negative
+            start_time = asyncio.get_event_loop().time()
+
+            # Allow skipping fetch entirely if limit is 0
+            if startup_limit == 0:
+                logger.info("Startup market fetch disabled (limit=0)")
+                return 0
+
+            logger.info(f"Fetching markets (limit: {startup_limit})...")
 
             while True:
+                # Check if shutdown requested
+                if self._stop_event.is_set():
+                    logger.info("Market refresh aborted: shutdown requested")
+                    break
+
+                # Calculate how many more we need (enforce limit strictly)
+                remaining = startup_limit - total_fetched
+                if remaining <= 0:
+                    self._initial_fetch_complete = True
+                    logger.info(
+                        f"Reached startup limit ({startup_limit}). "
+                        "Background task will fetch remaining markets."
+                    )
+                    break
+
+                fetch_limit = min(limit, remaining)
+
                 markets = await self._rest_client.get_markets(
                     active_only=True,
-                    limit=limit,
+                    limit=fetch_limit,
                     offset=offset,
                 )
 
@@ -532,22 +595,113 @@ class IngestionService:
                         self._token_to_market[token.token_id] = market.condition_id
 
                 total_fetched += len(markets)
+                offset += len(markets)
+
+                # Progress logging every 500 markets
+                if total_fetched % 500 == 0:
+                    elapsed = asyncio.get_event_loop().time() - start_time
+                    logger.debug(f"  ... {total_fetched} markets fetched ({elapsed:.1f}s)")
+
+                # If we got fewer than requested, we've reached the end
+                if len(markets) < fetch_limit:
+                    break
+
+            elapsed = asyncio.get_event_loop().time() - start_time
+            token_count = len(self._token_to_market)
+            logger.info(
+                f"Fetched {total_fetched} markets ({token_count} tokens) in {elapsed:.1f}s"
+            )
+            return offset
+
+        except asyncio.CancelledError:
+            logger.info("Market refresh cancelled")
+            raise
+        except Exception as e:
+            logger.error(f"Failed to refresh markets: {e}")
+            return 0
+
+    async def _background_fetch_remaining_markets(self) -> None:
+        """
+        Background task to fetch remaining markets after startup.
+
+        Continues from where _refresh_markets() stopped and subscribes
+        to new tokens incrementally.
+        """
+        if not self._rest_client or not self._websocket:
+            return
+
+        # Start from where startup fetch ended
+        offset = len(self._markets_cache)
+        limit = 100
+        total_fetched = 0
+        new_tokens: list[str] = []
+        start_time = asyncio.get_event_loop().time()
+
+        logger.info(f"Background: fetching remaining markets from offset {offset}...")
+
+        try:
+            while not self._stop_event.is_set():
+                markets = await self._rest_client.get_markets(
+                    active_only=True,
+                    limit=limit,
+                    offset=offset,
+                )
+
+                if not markets:
+                    break
+
+                for market in markets:
+                    if market.condition_id not in self._markets_cache:
+                        self._markets_cache[market.condition_id] = market
+                        for token in market.tokens:
+                            if token.token_id not in self._token_to_market:
+                                self._token_to_market[token.token_id] = market.condition_id
+                                new_tokens.append(token.token_id)
+
+                total_fetched += len(markets)
+                offset += len(markets)
+
+                # Subscribe to new tokens in chunks
+                # Note: WebSocket.subscribe() queues tokens for reconnect, so we
+                # call it even if disconnected to ensure no tokens are lost
+                if len(new_tokens) >= 100 and self._websocket:
+                    await self._websocket.subscribe(new_tokens[:100])
+                    logger.debug(f"Background: subscribed to {len(new_tokens[:100])} new tokens")
+                    new_tokens = new_tokens[100:]
+
+                # Progress logging every 1000 markets
+                if total_fetched % 1000 == 0:
+                    elapsed = asyncio.get_event_loop().time() - start_time
+                    logger.info(f"Background: {total_fetched} additional markets fetched ({elapsed:.1f}s)")
 
                 # If we got fewer than limit, we've reached the end
                 if len(markets) < limit:
                     break
 
-                offset += limit
-
-                # Safety limit to prevent infinite loops
+                # Safety limit
                 if total_fetched >= 10000:
-                    logger.warning("Reached market fetch limit (10000)")
+                    logger.warning("Background: reached safety limit (10000 additional markets)")
                     break
 
-            logger.info(f"Fetched {total_fetched} active markets")
+            # Subscribe to any remaining tokens
+            # Note: WebSocket.subscribe() queues tokens for reconnect
+            if new_tokens and self._websocket:
+                await self._websocket.subscribe(new_tokens)
+                logger.debug(f"Background: subscribed to final {len(new_tokens)} tokens")
 
+            elapsed = asyncio.get_event_loop().time() - start_time
+            total_markets = len(self._markets_cache)
+            total_tokens = len(self._token_to_market)
+            logger.info(
+                f"Background: completed. Total: {total_markets} markets, "
+                f"{total_tokens} tokens ({elapsed:.1f}s)"
+            )
+
+        except asyncio.CancelledError:
+            logger.info("Background market fetch cancelled")
+            raise
         except Exception as e:
-            logger.error(f"Failed to refresh markets: {e}")
+            logger.error(f"Background market fetch failed: {e}")
 
     async def _start_dashboard(self) -> None:
         """Start the dashboard server in the background."""

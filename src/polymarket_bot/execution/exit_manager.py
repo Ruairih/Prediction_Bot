@@ -195,13 +195,29 @@ class ExitManager:
         try:
             # Submit sell order if client available
             if self._clob_client:
-                result = self._clob_client.create_order(
+                # py-clob-client requires OrderArgs object
+                from py_clob_client.clob_types import OrderArgs
+
+                order_args = OrderArgs(
                     token_id=position.token_id,
                     side="SELL",
                     price=float(current_price),
                     size=float(position.size),
                 )
-                order_id = result.get("orderID") or result.get("order_id")
+
+                result = self._clob_client.create_and_post_order(order_args)
+
+                if isinstance(result, dict):
+                    order_id = result.get("orderID") or result.get("order_id") or result.get("id")
+                else:
+                    order_id = str(result) if result else None
+
+                if not order_id:
+                    logger.warning(
+                        f"Exit order for {position.position_id} returned no order_id. "
+                        f"Position NOT closed to avoid desync."
+                    )
+                    return False
 
                 # FIX: Wait for order fill (not just acceptance) before closing position
                 if wait_for_fill and order_id:
@@ -223,6 +239,7 @@ class ExitManager:
                 position.position_id,
                 exit_price=current_price,
                 reason=reason,
+                exit_order_id=order_id,
             )
 
             # G4: Refresh balance after exit to get accurate available balance
@@ -379,9 +396,15 @@ class ExitManager:
         return executed
 
     def _calculate_hold_duration(self, position: Position) -> timedelta:
-        """Calculate how long a position has been held."""
+        """
+        Calculate how long a position has been held for exit logic.
+
+        Uses position.hold_start which returns hold_start_at if set,
+        otherwise falls back to entry_time. This allows imported positions
+        to have different hold periods than bot-created positions.
+        """
         now = datetime.now(timezone.utc)
-        return now - position.entry_time
+        return now - position.hold_start
 
     async def handle_resolution(
         self,
@@ -411,6 +434,7 @@ class ExitManager:
             position.position_id,
             exit_price=resolved_price,
             reason=reason,
+            exit_order_id=None,
         )
 
         # FIX: G4 protection - refresh balance after resolution settlement

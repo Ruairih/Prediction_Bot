@@ -194,17 +194,17 @@ trades = await client.get_recent_trades(condition_id, max_age_seconds=300)
 | **What** | Multiple `token_id`s can map to the same market (`condition_id`) |
 | **Impact** | Traded same market multiple times, thinking they were different |
 | **Affects** | storage, core, strategies |
-| **Rule** | **Deduplicate by (condition_id, threshold), not just token_id** |
+| **Rule** | **Use `should_trigger()` which checks both token_id AND condition_id** |
 
 ```python
 # WRONG - only checks token_id
 if not triggers.has_triggered(token_id, threshold):
     execute()
 
-# RIGHT - checks both
-if not triggers.has_triggered(token_id, threshold) and \
-   not triggers.has_condition_triggered(condition_id, threshold):
+# RIGHT - use should_trigger() for combined check
+if triggers.should_trigger(token_id, condition_id, threshold):
     execute()
+    triggers.create(trigger)
 ```
 
 ### G3: WebSocket Missing Trade Size
@@ -278,6 +278,39 @@ import re
 weather_pattern = r'\b(rain|snow|hurricane|storm|weather)\b'
 if re.search(weather_pattern, question, re.IGNORECASE):
     block_as_weather()
+```
+
+### G7: Timezone-Aware Datetime in PostgreSQL
+
+| | |
+|---|---|
+| **What** | `asyncpg` errors when inserting timezone-aware datetimes into `timestamp without time zone` columns |
+| **Impact** | Database inserts failed for market data |
+| **Affects** | ingestion, storage |
+| **Rule** | **Convert to naive UTC before inserting into PostgreSQL** |
+
+```python
+def _to_naive_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+```
+
+### G8: Startup Hang (Market Fetch Blocking)
+
+| | |
+|---|---|
+| **What** | Bot appeared frozen during startup for 30+ seconds while fetching all markets |
+| **Impact** | Users thought the bot crashed; CI/CD timeouts |
+| **Affects** | ingestion |
+| **Rule** | **Cap startup fetch, continue in background** |
+
+```python
+# IngestionConfig has startup_market_limit (default: 2000)
+# Background task fetches remaining markets after startup
+# Startup: ~2s instead of 30+s
 ```
 
 ---

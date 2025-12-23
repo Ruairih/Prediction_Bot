@@ -13,7 +13,6 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal
 from typing import TYPE_CHECKING, Callable, Optional, List, Any
 
 if TYPE_CHECKING:
@@ -198,56 +197,11 @@ class BackgroundTasksManager:
 
     async def _execute_promotion(self, promotion: Any) -> None:
         """Execute a promoted watchlist entry."""
-        if not self._engine or not self._execution_service:
+        if not self._engine:
             return
 
         try:
-            # Build signal from promotion
-            from polymarket_bot.strategies import EntrySignal, StrategyContext
-
-            trigger_price = getattr(promotion, "trigger_price", Decimal("0.95"))
-            signal = EntrySignal(
-                reason=f"Watchlist promotion (score={promotion.new_score:.2f})",
-                token_id=promotion.token_id,
-                side="BUY",
-                price=trigger_price,
-                size=Decimal(str(self._engine.config.position_size)),
-            )
-
-            if self._engine.config.dry_run:
-                logger.info(
-                    f"DRY RUN: Would execute watchlist promotion for "
-                    f"{promotion.token_id} (score={promotion.new_score:.2f})"
-                )
-            else:
-                # Build minimal context for execution
-                context = StrategyContext(
-                    condition_id=getattr(promotion, "condition_id", ""),
-                    token_id=promotion.token_id,
-                    question=getattr(promotion, "question", ""),
-                    category=None,
-                    trigger_price=trigger_price,
-                    trade_size=None,
-                    time_to_end_hours=getattr(promotion, "time_to_end_hours", 24.0),
-                    trade_age_seconds=0.0,
-                    model_score=promotion.new_score,
-                    outcome=getattr(promotion, "outcome", None),
-                    outcome_index=getattr(promotion, "outcome_index", None),
-                )
-
-                # Execute via ExecutionService
-                result = await self._execution_service.execute_entry(signal, context)
-
-                if result.success:
-                    logger.info(
-                        f"Executed watchlist promotion for {promotion.token_id}: "
-                        f"order_id={result.order_id}"
-                    )
-                else:
-                    logger.warning(
-                        f"Failed to execute watchlist promotion for {promotion.token_id}: "
-                        f"{result.error_type} - {result.error}"
-                    )
+            await self._engine.execute_watchlist_promotion(promotion)
 
         except Exception as e:
             logger.error(f"Error executing promotion: {e}")

@@ -238,6 +238,7 @@ class OrderManager:
 
             order = self._orders[order_id]
             previous_filled = order.filled_size
+            previous_avg_price = order.avg_fill_price
 
             # Update status - handle ALL CLOB statuses including edge cases
             clob_status = result.get("status", "").upper()
@@ -275,13 +276,19 @@ class OrderManager:
             elif order.status == OrderStatus.PARTIAL:
                 # FIX: Partial fill - adjust reservation for the filled portion
                 new_filled = filled_size - previous_filled
-                if new_filled > 0 and order.avg_fill_price:
-                    # Calculate the cost of the newly filled portion
-                    filled_cost = new_filled * order.avg_fill_price
-                    self._balance_manager.adjust_reservation_for_partial_fill(
-                        order_id,
-                        filled_cost,
-                    )
+                if new_filled > 0:
+                    fill_price = order.avg_fill_price or order.price
+                    if order.avg_fill_price and previous_avg_price:
+                        filled_cost = (filled_size * order.avg_fill_price) - (
+                            previous_filled * previous_avg_price
+                        )
+                    else:
+                        filled_cost = new_filled * fill_price
+                    if filled_cost > 0:
+                        self._balance_manager.adjust_reservation_for_partial_fill(
+                            order_id,
+                            filled_cost,
+                        )
                 self._balance_manager.refresh_balance()  # G4 protection
 
             logger.debug(f"Order {order_id} status: {order.status.value}")
@@ -390,13 +397,23 @@ class OrderManager:
             return f"mock_order_{datetime.now(timezone.utc).timestamp()}"
 
         try:
-            result = self._clob_client.create_order(
+            # py-clob-client requires OrderArgs object, not kwargs
+            from py_clob_client.clob_types import OrderArgs
+
+            order_args = OrderArgs(
                 token_id=token_id,
-                side=side,
+                side=side.upper(),  # Ensure uppercase (BUY/SELL)
                 price=float(price),
                 size=float(size),
             )
-            return result.get("orderID", result.get("order_id", ""))
+
+            # Create and post order in one call
+            result = self._clob_client.create_and_post_order(order_args)
+
+            # Result may be the order dict or have nested structure
+            if isinstance(result, dict):
+                return result.get("orderID", result.get("order_id", result.get("id", "")))
+            return str(result) if result else ""
 
         except Exception as e:
             # Check for balance error

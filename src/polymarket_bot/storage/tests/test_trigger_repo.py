@@ -32,16 +32,38 @@ class TestTriggerRepository:
         await trigger_repo.create(sample_trigger)
 
         result = await trigger_repo.has_triggered(
-            sample_trigger.token_id, sample_trigger.threshold
+            sample_trigger.token_id,
+            sample_trigger.condition_id,
+            sample_trigger.threshold,
         )
 
         assert result is True
 
     async def test_has_triggered_returns_false(self, trigger_repo: TriggerRepository):
         """Test has_triggered returns False for non-existent trigger."""
-        result = await trigger_repo.has_triggered("nonexistent", 0.95)
+        result = await trigger_repo.has_triggered("nonexistent", "0xcondition", 0.95)
 
         assert result is False
+
+    async def test_has_triggered_different_condition_returns_false(
+        self, trigger_repo: TriggerRepository, sample_trigger: PolymarketFirstTrigger
+    ):
+        """
+        Test has_triggered returns False for different condition_id.
+
+        This tests the fix where old migrated rows with empty condition_id
+        should not suppress new triggers with actual condition_ids.
+        """
+        await trigger_repo.create(sample_trigger)
+
+        # Same token_id but different condition_id should return False
+        result = await trigger_repo.has_triggered(
+            sample_trigger.token_id,
+            "0xdifferent_condition",  # Different condition
+            sample_trigger.threshold,
+        )
+
+        assert result is False, "Different condition_id should not match"
 
     async def test_has_condition_triggered_critical(
         self, trigger_repo: TriggerRepository, sample_trigger: PolymarketFirstTrigger

@@ -31,7 +31,7 @@ class TestOrderSubmission:
         )
 
         assert order_id == "order_123"
-        mock_clob_client.create_order.assert_called_once()
+        mock_clob_client.create_and_post_order.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_respects_max_price(self, order_manager):
@@ -79,7 +79,7 @@ class TestOrderSubmission:
     @pytest.mark.asyncio
     async def test_sell_orders_bypass_max_price(self, order_manager, mock_clob_client):
         """SELL orders should not be limited by max price."""
-        mock_clob_client.create_order.return_value = {"orderID": "sell_order"}
+        mock_clob_client.create_and_post_order.return_value = {"orderID": "sell_order"}
 
         order_id = await order_manager.submit_order(
             token_id="tok_yes_abc",
@@ -135,7 +135,7 @@ class TestOrderTracking:
     @pytest.mark.asyncio
     async def test_gets_open_orders(self, order_manager, mock_clob_client):
         """Should return list of open orders."""
-        mock_clob_client.create_order.side_effect = [
+        mock_clob_client.create_and_post_order.side_effect = [
             {"orderID": "order_1", "status": "LIVE"},
             {"orderID": "order_2", "status": "LIVE"},
         ]
@@ -266,14 +266,14 @@ class TestBalanceRefresh:
         )
 
         # Update mock to return lower balance (simulating fill)
-        mock_clob_client.get_balance.return_value = {"USDC": "981.00"}
+        mock_clob_client.get_balance_allowance.return_value = {"balance": "981000000"}
 
         # Sync triggers refresh
         await order_manager.sync_order_status("order_123")
 
         # Should have called get_balance after sync
         # (once on init, once on sync)
-        assert mock_clob_client.get_balance.call_count >= 2
+        assert mock_clob_client.get_balance_allowance.call_count >= 2
 
 
 class TestLoadOrders:

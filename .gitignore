@@ -71,3 +71,4 @@ polymarket_api_creds.json
 # OS
 .DS_Store
 Thumbs.db
+node_modules/

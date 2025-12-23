@@ -194,7 +194,7 @@ class TestAggregateMetrics:
         async def mock_fetchrow(query, *args):
             if "wins" in query:
                 return {"wins": 7, "total": 10}
-            elif "SUM(realized_pnl)" in query:
+            elif "SUM(net_pnl)" in query or "SUM(realized_pnl)" in query:
                 return {"total": 25.50}
             elif "COUNT" in query and "positions" in query:
                 return {"count": 3}

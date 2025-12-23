@@ -238,7 +238,7 @@ class ExitEvent(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     id: Optional[int] = None
-    position_id: int
+    position_id: str
     token_id: str
     condition_id: Optional[str] = None
     exit_type: str  # 'stop_loss', 'take_profit', 'manual', 'resolution'

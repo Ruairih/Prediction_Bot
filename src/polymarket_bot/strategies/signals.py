@@ -58,7 +58,7 @@ class ExitSignal(Signal):
     """
 
     type: SignalType = field(default=SignalType.EXIT, init=False)
-    position_id: int = 0
+    position_id: str = ""
 
 
 @dataclass(frozen=True)

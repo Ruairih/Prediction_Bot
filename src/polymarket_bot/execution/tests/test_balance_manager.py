@@ -45,7 +45,7 @@ class TestBalanceTracking:
 
         assert balance1 == balance2
         # Should only call CLOB once
-        assert mock_clob_client.get_balance.call_count == 1
+        assert mock_clob_client.get_balance_allowance.call_count == 1
 
 
 class TestReservations:
@@ -149,7 +149,7 @@ class TestCacheRefresh:
         manager.get_available_balance()
 
         # Update mock balance
-        mock_clob_client.get_balance.return_value = {"USDC": "500.00"}
+        mock_clob_client.get_balance_allowance.return_value = {"balance": "500000000"}
 
         # Regular call uses cache
         cached = manager.get_available_balance()
@@ -168,7 +168,7 @@ class TestCacheRefresh:
         manager.get_available_balance()
 
         # Update and refresh
-        mock_clob_client.get_balance.return_value = {"USDC": "750.00"}
+        mock_clob_client.get_balance_allowance.return_value = {"balance": "750000000"}
         manager.refresh_balance()
 
         # Next call should use new value

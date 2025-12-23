@@ -51,8 +51,8 @@ def mock_db():
 def mock_clob_client():
     """Mock CLOB client with successful responses."""
     client = MagicMock()
-    client.get_balance.return_value = {"USDC": "1000.00"}
-    client.create_order.return_value = {"orderID": "order_123", "status": "LIVE"}
+    client.get_balance_allowance.return_value = {"balance": "1000000000"}
+    client.create_and_post_order.return_value = {"orderID": "order_123", "status": "LIVE"}
     client.get_order.return_value = {
         "orderID": "order_123",
         "status": "MATCHED",
@@ -202,7 +202,7 @@ class TestStateLoading:
         """load_state should refresh balance from CLOB."""
         await execution_service.load_state()
 
-        mock_clob_client.get_balance.assert_called()
+        mock_clob_client.get_balance_allowance.assert_called()
 
     @pytest.mark.asyncio
     async def test_load_state_loads_open_orders(self, execution_service, mock_db):
@@ -251,7 +251,7 @@ class TestEntryExecution:
         """Should submit order to CLOB."""
         await execution_service.execute_entry(entry_signal, strategy_context)
 
-        mock_clob_client.create_order.assert_called()
+        mock_clob_client.create_and_post_order.assert_called()
 
     @pytest.mark.asyncio
     async def test_execute_entry_syncs_order_status(
@@ -297,8 +297,8 @@ class TestEntryExecution:
         """Should handle insufficient balance error."""
         # Create client that fails on order creation
         failing_client = MagicMock()
-        failing_client.get_balance.return_value = {"USDC": "5.00"}  # Low balance
-        failing_client.create_order.side_effect = Exception("Insufficient balance")
+        failing_client.get_balance_allowance.return_value = {"balance": "5000000"}  # Low balance
+        failing_client.create_and_post_order.side_effect = Exception("Insufficient balance")
 
         service = ExecutionService(
             db=mock_db,
@@ -371,8 +371,8 @@ class TestExitExecution:
             exit_signal, sample_position, Decimal("0.99")
         )
 
-        # Should have called create_order for exit
-        mock_clob_client.create_order.assert_called()
+        # Should have called create_and_post_order for exit
+        mock_clob_client.create_and_post_order.assert_called()
 
 
 # =============================================================================

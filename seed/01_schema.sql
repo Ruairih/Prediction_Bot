@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS trade_watermarks (
 
 CREATE TABLE IF NOT EXISTS polymarket_first_triggers (
     token_id TEXT NOT NULL,
-    condition_id TEXT,
+    condition_id TEXT NOT NULL DEFAULT '',
     threshold REAL NOT NULL,
     trigger_timestamp BIGINT NOT NULL,
     price REAL,
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS polymarket_first_triggers (
     model_version TEXT,
     outcome TEXT,
     outcome_index INTEGER,
-    PRIMARY KEY (token_id, threshold)
+    PRIMARY KEY (token_id, condition_id, threshold)
 );
 
 CREATE TABLE IF NOT EXISTS trigger_watermarks (

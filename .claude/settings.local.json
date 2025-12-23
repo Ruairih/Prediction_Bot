@@ -31,7 +31,12 @@
       "Bash(sudo apt install:*)",
       "WebSearch",
       "WebFetch(domain:raw.githubusercontent.com)",
-      "Bash(pkill:*)"
+      "Bash(pkill:*)",
+      "Bash(docker compose build:*)",
+      "Bash(bash:*)",
+      "Bash(sudo systemctl restart:*)",
+      "Bash(docker compose:*)",
+      "Bash(psql:*)"
     ]
   }
 }

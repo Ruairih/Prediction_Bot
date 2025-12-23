@@ -208,20 +208,41 @@ class TradingBot:
             # Always initialize database
             await self._init_database()
 
+            # Check shutdown between init steps to abort early if signal received
+            if self._shutdown_event.is_set():
+                logger.info("Shutdown requested during startup")
+                return
+
             # Initialize engine BEFORE ingestion so we don't lose early events
             if mode in ("all", "engine"):
                 await self._init_engine()
+
+            if self._shutdown_event.is_set():
+                logger.info("Shutdown requested during startup")
+                return
 
             # Initialize ingestion AFTER engine is ready
             if mode in ("all", "ingestion"):
                 await self._init_ingestion()
 
+            if self._shutdown_event.is_set():
+                logger.info("Shutdown requested during startup")
+                return
+
             # Initialize tiered data architecture (universe fetching)
             if mode in ("all", "ingestion"):
                 await self._init_universe_updater()
 
+            if self._shutdown_event.is_set():
+                logger.info("Shutdown requested during startup")
+                return
+
             if mode in ("all", "monitor"):
                 await self._init_monitoring()
+
+            if self._shutdown_event.is_set():
+                logger.info("Shutdown requested during startup")
+                return
 
             # Start background tasks for engine mode
             if mode in ("all", "engine"):

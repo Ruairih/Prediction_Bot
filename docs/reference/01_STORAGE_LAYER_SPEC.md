@@ -563,7 +563,7 @@ CREATE INDEX IF NOT EXISTS idx_positions_strategy ON positions(strategy_name);
 
 CREATE TABLE IF NOT EXISTS exit_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    position_id INTEGER NOT NULL REFERENCES positions(id),
+    position_id TEXT NOT NULL, -- Text for UUID/string compatibility
 
     -- What happened
     exit_type TEXT NOT NULL,      -- 'resolution', 'profit_target', 'stop_loss', 'manual'

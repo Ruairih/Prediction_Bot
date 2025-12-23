@@ -418,19 +418,23 @@ class MarketUniverseRepository(BaseRepository[MarketUniverse]):
         """Batch update interestingness scores."""
         count = 0
         for condition_id, score in scores.items():
+            # FIX: Explicit cast to REAL to avoid asyncpg AmbiguousParameterError
+            # PostgreSQL parses 20.0 as numeric, not real, causing type conflict
+            # with the interestingness_score column which is REAL.
+            # Using $2::real ensures consistent type inference.
             result = await self.db.execute(
                 """
                 UPDATE market_universe
-                SET interestingness_score = $2,
+                SET interestingness_score = $2::real,
                     score_below_threshold_since = CASE
-                        WHEN $2 < 20 AND score_below_threshold_since IS NULL THEN NOW()
-                        WHEN $2 >= 20 THEN NULL
+                        WHEN $2::real < 20.0 AND score_below_threshold_since IS NULL THEN NOW()
+                        WHEN $2::real >= 20.0 THEN NULL
                         ELSE score_below_threshold_since
                     END
                 WHERE condition_id = $1
                 """,
                 condition_id,
-                score,
+                float(score),
             )
             if result != "UPDATE 0":
                 count += 1

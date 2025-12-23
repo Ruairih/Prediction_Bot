@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
@@ -229,6 +230,16 @@ class PolymarketWebSocket:
         """Establish WebSocket connection."""
         await self._set_state(WebSocketState.CONNECTING)
 
+        # FIX: Cancel old heartbeat task before creating new one to prevent task leak
+        # Codex identified: old heartbeat_task wasn't cancelled on reconnect
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            self._heartbeat_task = None
+
         try:
             self._ws = await websockets.connect(
                 self._url,
@@ -237,7 +248,7 @@ class PolymarketWebSocket:
                 close_timeout=5,
             )
 
-            self._last_message_time = asyncio.get_event_loop().time()
+            self._last_message_time = time.time()
             self._current_reconnect_delay = self._initial_reconnect_delay
 
             await self._set_state(WebSocketState.CONNECTED)
@@ -266,7 +277,7 @@ class PolymarketWebSocket:
                         self._ws.recv(),
                         timeout=self._heartbeat_timeout,
                     )
-                    self._last_message_time = asyncio.get_event_loop().time()
+                    self._last_message_time = time.time()
                     await self._handle_message(message)
 
                 except asyncio.TimeoutError:
@@ -317,7 +328,7 @@ class PolymarketWebSocket:
                 if self._last_message_time is None:
                     continue
 
-                elapsed = asyncio.get_event_loop().time() - self._last_message_time
+                elapsed = time.time() - self._last_message_time
 
                 if elapsed > self._heartbeat_timeout:
                     logger.warning(

@@ -98,9 +98,9 @@ class TestExitExecution:
         )
 
         # Should have submitted sell order
-        mock_clob_client.create_order.assert_called()
-        call_kwargs = mock_clob_client.create_order.call_args[1]
-        assert call_kwargs["side"] == "SELL"
+        mock_clob_client.create_and_post_order.assert_called()
+        order_args = mock_clob_client.create_and_post_order.call_args[0][0]
+        assert order_args.side == "SELL"  # OrderArgs is a dataclass, use attribute access
 
     @pytest.mark.asyncio
     async def test_closes_position_on_exit(

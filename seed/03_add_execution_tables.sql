@@ -45,7 +45,7 @@ CREATE INDEX IF NOT EXISTS idx_triggers_triggered_at ON triggers(triggered_at);
 -- For compatibility, create a view that maps old column names to new ones
 -- This is a workaround since SQLite doesn't support ADD COLUMN IF NOT EXISTS
 
-CREATE VIEW IF NOT EXISTS exit_events_v AS
+CREATE OR REPLACE VIEW exit_events_v AS
 SELECT
     id,
     position_id,
