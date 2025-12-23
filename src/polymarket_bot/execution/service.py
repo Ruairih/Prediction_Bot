@@ -23,6 +23,7 @@ from .balance_manager import (
 )
 from .exit_manager import ExitConfig, ExitManager
 from .order_manager import Order, OrderConfig, OrderManager, OrderStatus, PriceTooHighError
+from .position_sync import PositionSyncService
 from .position_tracker import ExitEvent, Position, PositionTracker
 
 if TYPE_CHECKING:
@@ -49,6 +50,9 @@ class ExecutionConfig:
     # Fill confirmation
     wait_for_fill: bool = True
     fill_timeout_seconds: float = 30.0
+
+    # Wallet address for position sync (G12 fix)
+    wallet_address: Optional[str] = None
 
     @property
     def order_config(self) -> OrderConfig:
@@ -153,6 +157,11 @@ class ExecutionService:
             balance_manager=self._balance_manager,
             config=self._config.exit_config,
         )
+        # G12 FIX: Position sync service for size updates before exits
+        self._position_sync = PositionSyncService(
+            db=db,
+            position_tracker=self._position_tracker,
+        )
 
     @property
     def position_tracker(self) -> PositionTracker:
@@ -192,6 +201,26 @@ class ExecutionService:
         logger.info(
             f"Loaded state: {open_positions} positions, {open_orders} orders"
         )
+
+    async def sync_position_sizes(self) -> int:
+        """
+        Sync position sizes from Polymarket API.
+
+        G12 FIX: Call this before exit evaluation to ensure position sizes
+        are accurate. Prevents "not enough balance / allowance" errors when
+        positions were partially sold externally.
+
+        Returns:
+            Number of positions updated
+        """
+        wallet_address = self._config.wallet_address
+        if not wallet_address:
+            logger.info("sync_position_sizes: no wallet_address configured, skipping")
+            return 0
+
+        logger.info(f"sync_position_sizes: syncing for {wallet_address[:10]}...")
+        result = await self._position_sync.quick_sync_sizes(wallet_address)
+        return result.get("updated", 0)
 
     async def execute_entry(
         self,

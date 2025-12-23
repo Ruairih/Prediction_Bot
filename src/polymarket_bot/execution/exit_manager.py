@@ -101,9 +101,28 @@ class ExitManager:
             position: The position to evaluate
 
         Returns:
-            "hold_to_resolution" for short positions
-            "conditional_exit" for long positions
+            "hold_to_resolution" for short positions with KNOWN age
+            "conditional_exit" for long positions OR unknown age positions
+
+        CRITICAL FIX: Unknown age positions are ELIGIBLE for exit.
+
+        The 7-day hold only applies to positions where we KNOW the age is
+        accurate (bot_created or actual timestamps). If age_source is
+        "unknown" (e.g., synced with hold_policy="new"), we default to
+        conditional_exit to avoid blocking profitable exits forever.
+
+        This prevents the recurring bug where synced positions at 99.8¢
+        never exit because hold_start_at was set to NOW during sync.
         """
+        # CRITICAL: Unknown age = eligible for exit (not blocked)
+        # This is the permanent fix for the recurring hold_start_at bug
+        if not position.has_known_age:
+            logger.debug(
+                f"Position {position.position_id} has unknown age "
+                f"(age_source={position.age_source}), eligible for exit"
+            )
+            return "conditional_exit"
+
         hold_duration = self._calculate_hold_duration(position)
 
         if hold_duration.days < self._config.min_hold_days:

@@ -359,45 +359,52 @@ class PositionSyncService:
             local = local_positions.get(remote.token_id)
 
             if local is None:
-                # Calculate hold_start based on policy (per-position for "actual")
+                # Calculate hold_start and age_source based on policy
+                # age_source determines if exit logic trusts the timestamp:
+                # - "actual": Timestamp from trade history, trusted
+                # - "unknown": Timestamp set to NOW, NOT trusted (eligible for exit)
                 if hold_policy == "actual":
                     actual_timestamp = trade_timestamps.get(remote.token_id)
                     if actual_timestamp:
                         hold_start = actual_timestamp
+                        age_source = "actual"  # Trusted timestamp
                         hold_age_days = (now - hold_start).days
                         logger.info(
                             f"[{run_id}] IMPORT: {remote.title[:50]}... "
                             f"({remote.size} {remote.outcome} @ ${remote.avg_price:.4f}) "
-                            f"[ACTUAL: {hold_age_days}d old]"
+                            f"[ACTUAL: {hold_age_days}d old, age_source=actual]"
                         )
                     else:
                         # Fallback to "new" if no trade history found
                         hold_start = now
+                        age_source = "unknown"  # NOT trusted - eligible for exit
                         logger.warning(
                             f"[{run_id}] IMPORT: {remote.title[:50]}... "
                             f"({remote.size} {remote.outcome} @ ${remote.avg_price:.4f}) "
-                            f"[NO TRADE HISTORY - using NOW]"
+                            f"[NO TRADE HISTORY - age_source=unknown, ELIGIBLE FOR EXIT]"
                         )
                 elif hold_policy == "mature":
                     hold_start = now - timedelta(days=mature_days)
+                    age_source = "unknown"  # Backdated but not verified
                     logger.info(
                         f"[{run_id}] IMPORT: {remote.title[:50]}... "
                         f"({remote.size} {remote.outcome} @ ${remote.avg_price:.4f}) "
-                        f"[MATURE: {mature_days}d backdated]"
+                        f"[MATURE: {mature_days}d backdated, age_source=unknown]"
                     )
                 else:  # "new" policy (default)
                     hold_start = now
+                    age_source = "unknown"  # NOT trusted - eligible for exit
                     logger.info(
                         f"[{run_id}] IMPORT: {remote.title[:50]}... "
                         f"({remote.size} {remote.outcome} @ ${remote.avg_price:.4f}) "
-                        f"[NEW: 0d hold]"
+                        f"[NEW: age_source=unknown, ELIGIBLE FOR EXIT]"
                     )
 
                 hold_start_str = hold_start.strftime("%Y-%m-%dT%H:%M:%SZ")
 
                 if not dry_run:
                     try:
-                        await self._import_position(remote, hold_start_str, now_str)
+                        await self._import_position(remote, hold_start_str, now_str, age_source)
                         imported += 1
                     except Exception as e:
                         errors.append(f"Failed to import {remote.token_id}: {e}")
@@ -498,8 +505,18 @@ class PositionSyncService:
         remote: RemotePosition,
         hold_start_str: str,
         now_str: str,
+        age_source: str = "unknown",
     ) -> None:
-        """Import a new position from Polymarket."""
+        """Import a new position from Polymarket.
+
+        Args:
+            remote: Position data from Polymarket API
+            hold_start_str: Hold start timestamp (for exit logic)
+            now_str: Current timestamp
+            age_source: Reliability of timestamp for exit logic:
+                - "actual": From trade history, trusted
+                - "unknown": Set to NOW, NOT trusted (eligible for exit)
+        """
         entry_cost = float(remote.size * remote.avg_price)
 
         query = """
@@ -508,13 +525,13 @@ class PositionSyncService:
                 size, entry_price, entry_cost, current_price, current_value,
                 unrealized_pnl, status, description,
                 entry_timestamp, created_at, updated_at,
-                imported_at, import_source, hold_start_at
+                imported_at, import_source, hold_start_at, age_source
             ) VALUES (
                 $1, $2, $3, $4, 'BUY',
                 $5, $6, $7, $8, $9,
                 $10, 'open', $11,
                 $12, $13, $14,
-                $15, 'polymarket_sync', $16
+                $15, 'polymarket_sync', $16, $17
             )
         """
 
@@ -536,6 +553,7 @@ class PositionSyncService:
             now_str,  # updated_at
             now_str,  # imported_at
             hold_start_str,  # hold_start_at (based on policy)
+            age_source,  # Timestamp reliability for exit logic
         )
 
     async def _update_position_size(
@@ -661,13 +679,18 @@ class PositionSyncService:
     async def _update_hold_start(
         self, token_id: str, hold_start: datetime
     ) -> None:
-        """Update hold_start_at for an existing position."""
+        """Update hold_start_at for an existing position.
+
+        FIX: Also sets age_source='actual' to indicate the timestamp
+        came from actual trade history, not a guess.
+        """
         hold_start_str = hold_start.strftime("%Y-%m-%dT%H:%M:%SZ")
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         query = """
             UPDATE positions
             SET hold_start_at = $2,
+                age_source = 'actual',
                 updated_at = $3
             WHERE token_id = $1 AND status = 'open'
         """
@@ -708,3 +731,95 @@ class PositionSyncService:
             completed_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
             completed_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
         )
+
+    async def quick_sync_sizes(
+        self,
+        wallet_address: str,
+    ) -> Dict[str, Any]:
+        """
+        Quick sync of position sizes from Polymarket API.
+
+        G12 FIX: Syncs position sizes before exit attempts to prevent
+        "not enough balance / allowance" errors when positions were
+        partially sold externally.
+
+        This is faster than full sync - only updates sizes, doesn't
+        import new positions or close missing ones.
+
+        Args:
+            wallet_address: Wallet address to query
+
+        Returns:
+            Dict with sync results
+        """
+        logger.debug("Quick sync: fetching current position sizes...")
+
+        try:
+            remote_positions, partial = await self.fetch_remote_positions(wallet_address)
+
+            if partial:
+                logger.warning("Quick sync: partial API response, skipping")
+                return {"updated": 0, "error": "partial_response"}
+
+            # Build lookup of remote sizes
+            remote_sizes: Dict[str, tuple[Decimal, Decimal]] = {}
+            for rp in remote_positions:
+                remote_sizes[rp.token_id] = (rp.size, rp.avg_price)
+
+            # Get local open positions
+            local_positions = await self.get_local_positions()
+
+            updated = 0
+            now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            closed = 0
+            for token_id, local in local_positions.items():
+                if token_id not in remote_sizes:
+                    # Position completely gone from Polymarket - mark as closed
+                    logger.info(
+                        f"Quick sync: {token_id[:20]}... not found on Polymarket, marking closed"
+                    )
+                    await self._close_position_externally(token_id, now_str)
+
+                    # Update in-memory tracker if available
+                    if self._position_tracker:
+                        pos = self._position_tracker.get_position_by_token(token_id)
+                        if pos:
+                            pos.status = "closed"
+                            # Remove from token mapping
+                            if token_id in self._position_tracker._token_positions:
+                                del self._position_tracker._token_positions[token_id]
+
+                    closed += 1
+                    continue
+
+                remote_size, remote_avg_price = remote_sizes[token_id]
+                local_size = Decimal(str(local["size"]))
+
+                # Check if size changed significantly
+                if abs(remote_size - local_size) > Decimal("0.001"):
+                    logger.info(
+                        f"Quick sync: {token_id[:20]}... size {local_size} -> {remote_size}"
+                    )
+
+                    await self._update_position_size(
+                        token_id, remote_size, remote_avg_price, now_str
+                    )
+
+                    # Update in-memory tracker if available
+                    if self._position_tracker:
+                        pos = self._position_tracker.get_position_by_token(token_id)
+                        if pos:
+                            pos.size = remote_size
+                            pos.entry_cost = remote_size * remote_avg_price
+
+                    updated += 1
+
+            if updated > 0 or closed > 0:
+                logger.info(f"Quick sync: updated {updated} sizes, closed {closed} missing positions")
+
+            return {"updated": updated, "closed": closed, "checked": len(local_positions)}
+
+        except Exception as e:
+            logger.error(f"Quick sync error: {e}")
+            return {"updated": 0, "error": str(e)}

@@ -101,11 +101,11 @@ class BotConfig:
     websocket_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     max_trade_age_seconds: int = 300  # G1 protection
 
-    # Monitoring - bind to localhost by default for security
-    # Set DASHBOARD_HOST=0.0.0.0 to expose on network (requires DASHBOARD_API_KEY)
+    # Monitoring - See G11 in docs/reference/known_gotchas.md for Docker/Tailscale setup
+    # Set DASHBOARD_HOST=0.0.0.0 to expose on network (required for Docker/Tailscale)
     dashboard_enabled: bool = True
-    dashboard_host: str = "127.0.0.1"
-    dashboard_port: int = 5050
+    dashboard_host: str = "0.0.0.0"  # 0.0.0.0 for Docker/Tailscale, 127.0.0.1 for local only
+    dashboard_port: int = 9050  # Use a port FREE on host (not 5050, often in use)
 
     # Alerts
     telegram_bot_token: Optional[str] = None
@@ -132,8 +132,8 @@ class BotConfig:
             watchlist_rescore_interval_hours=float(os.environ.get("WATCHLIST_RESCORE_INTERVAL_HOURS", "1.0")),
             max_trade_age_seconds=int(os.environ.get("MAX_TRADE_AGE_SECONDS", "300")),
             dashboard_enabled=os.environ.get("DASHBOARD_ENABLED", "true").lower() == "true",
-            dashboard_host=os.environ.get("DASHBOARD_HOST", "127.0.0.1"),
-            dashboard_port=int(os.environ.get("DASHBOARD_PORT", "5050")),
+            dashboard_host=os.environ.get("DASHBOARD_HOST", "0.0.0.0"),
+            dashboard_port=int(os.environ.get("DASHBOARD_PORT", "9050")),
             telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN"),
             telegram_chat_id=os.environ.get("TELEGRAM_CHAT_ID"),
         )
@@ -440,6 +440,15 @@ class TradingBot:
                 )
 
         # Create ExecutionService for order management
+        # G12 FIX: Include wallet_address for position size sync before exits
+        wallet_address = None
+        if self.config.clob_credentials:
+            wallet_address = self.config.clob_credentials.get("funder")
+            if wallet_address:
+                logger.info(f"G12: Position sync enabled for wallet {wallet_address[:10]}...")
+            else:
+                logger.warning("G12: No 'funder' in credentials, position sync disabled")
+
         exec_config = ExecutionConfig(
             max_price=self.config.price_threshold,
             default_position_size=self.config.position_size,
@@ -447,6 +456,7 @@ class TradingBot:
             profit_target=self.config.profit_target,
             stop_loss=self.config.stop_loss,
             min_hold_days=self.config.min_hold_days,
+            wallet_address=wallet_address,
         )
 
         self._execution_service = ExecutionService(

@@ -47,11 +47,22 @@ class Position:
     # Exit logic uses hold_start_at to determine if 7-day hold has passed
     hold_start_at: Optional[datetime] = None
     import_source: Optional[str] = None  # 'bot_trade', 'polymarket_sync', 'manual_import'
+    # Age source tracks reliability of timestamp for exit logic:
+    # - "bot_created": Bot opened this position, timestamp is accurate
+    # - "actual": Timestamp fetched from trade history, accurate
+    # - "unknown": Timestamp was set to NOW during sync, NOT reliable
+    # CRITICAL: Unknown age positions should be ELIGIBLE for exit, not blocked!
+    age_source: str = "unknown"
 
     @property
     def hold_start(self) -> datetime:
         """Get the effective hold start time for exit logic."""
         return self.hold_start_at or self.entry_time
+
+    @property
+    def has_known_age(self) -> bool:
+        """Check if position age is reliably known for exit logic."""
+        return self.age_source in ("bot_created", "actual")
 
 
 @dataclass
@@ -197,6 +208,11 @@ class PositionTracker:
                 entry_cost=fill_size * fill_price,
                 entry_time=now,
                 entry_timestamp=_format_timestamp(now),
+                # FIX: Set trusted age source for bot-created positions
+                # This ensures the 7-day hold logic works correctly for new positions
+                hold_start_at=now,
+                import_source="bot_trade",
+                age_source="bot_created",
             )
 
             self.positions[position_id] = position
@@ -283,6 +299,10 @@ class PositionTracker:
                 entry_cost=delta_size * fill_price,
                 entry_time=now,
                 entry_timestamp=_format_timestamp(now),
+                # FIX: Set trusted age source for bot-created positions
+                hold_start_at=now,
+                import_source="bot_trade",
+                age_source="bot_created",
             )
 
             self.positions[position_id] = position
@@ -462,7 +482,7 @@ class PositionTracker:
         query = """
             SELECT id::text AS position_id, token_id, condition_id, size, entry_price,
                    entry_cost, entry_timestamp AS entry_time, realized_pnl, status,
-                   hold_start_at, import_source
+                   hold_start_at, import_source, age_source
             FROM positions
             WHERE status = 'open'
         """
@@ -496,6 +516,10 @@ class PositionTracker:
                 if hold_start_at.tzinfo is None:
                     hold_start_at = hold_start_at.replace(tzinfo=timezone.utc)
 
+            # age_source determines if exit logic trusts the timestamp
+            # Default to "unknown" (eligible for exit) if not set
+            age_source = r.get("age_source") or "unknown"
+
             position = Position(
                 position_id=r["position_id"],
                 token_id=r["token_id"],
@@ -509,6 +533,7 @@ class PositionTracker:
                 status=r["status"],
                 hold_start_at=hold_start_at,
                 import_source=r.get("import_source"),
+                age_source=age_source,
             )
             self.positions[position.position_id] = position
             self._token_positions[position.token_id] = position.position_id
@@ -522,26 +547,37 @@ class PositionTracker:
         exit_timestamp: Optional[datetime] = None,
         exit_order_id: Optional[str] = None,
     ) -> None:
-        """Persist position to database."""
+        """Persist position to database.
+
+        Bot-created positions get:
+        - import_source = 'bot_trade'
+        - age_source = 'bot_created' (trusted timestamp, 7-day hold applies)
+        - hold_start_at = entry_timestamp
+        """
         entry_timestamp = position.entry_timestamp or _format_timestamp(position.entry_time)
         position.entry_timestamp = entry_timestamp
         now_str = _format_timestamp(datetime.now(timezone.utc))
         exit_timestamp_str = _format_timestamp(exit_timestamp) if exit_timestamp else None
 
+        # Bot-created positions have trusted timestamps
+        import_source = position.import_source or "bot_trade"
+        age_source = position.age_source if position.age_source != "unknown" else "bot_created"
+        hold_start_str = _format_timestamp(position.hold_start_at) if position.hold_start_at else entry_timestamp
+
         query = """
             INSERT INTO positions
             (token_id, condition_id, size, entry_price, entry_cost,
              entry_timestamp, realized_pnl, status, exit_order_id, exit_timestamp,
-             created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+             created_at, updated_at, import_source, age_source, hold_start_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             ON CONFLICT (token_id, entry_timestamp) DO UPDATE
             SET size = $3,
                 entry_price = $4,
                 entry_cost = $5,
                 realized_pnl = $7,
                 status = $8,
-                exit_order_id = COALESCE($9, exit_order_id),
-                exit_timestamp = COALESCE($10, exit_timestamp),
+                exit_order_id = COALESCE($9, positions.exit_order_id),
+                exit_timestamp = COALESCE($10, positions.exit_timestamp),
                 updated_at = $12
         """
         await self._db.execute(
@@ -558,6 +594,9 @@ class PositionTracker:
             exit_timestamp_str,
             entry_timestamp,  # created_at
             now_str,
+            import_source,
+            age_source,
+            hold_start_str,
         )
 
     async def _save_exit_event(self, event: ExitEvent) -> None:

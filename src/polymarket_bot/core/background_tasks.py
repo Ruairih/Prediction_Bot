@@ -265,6 +265,16 @@ class BackgroundTasksManager:
                 if not self._running:
                     break
 
+                # G12 FIX: Sync position sizes from Polymarket before evaluating exits
+                # This prevents "not enough balance" errors when positions were
+                # partially sold externally
+                try:
+                    updated = await self._execution_service.sync_position_sizes()
+                    if updated > 0:
+                        logger.info(f"Synced {updated} position sizes before exit evaluation")
+                except Exception as e:
+                    logger.warning(f"Position size sync failed: {e}")
+
                 # Get current prices for open positions
                 if not self._price_fetcher:
                     # No price fetcher - skip this round

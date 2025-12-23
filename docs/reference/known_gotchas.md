@@ -259,6 +259,134 @@ await sync_service.sync_positions(
 
 ---
 
+## G11: Docker Dashboard Port Binding
+
+**What happened:** Dashboard was inaccessible from outside the Docker container even when running correctly inside.
+
+**Root causes (multiple issues):**
+1. **Localhost binding:** Default `DASHBOARD_HOST=127.0.0.1` only listens on container's localhost, not accessible from host or network
+2. **Port mapping mismatch:** Code used port 5050, but docker-compose.yml mapped different ports
+3. **Port conflict inside container:** Port 8080 was in use by Codex MCP server
+4. **Port conflict on host:** Port 5050 was in use on the host machine (outside the container)
+
+**Understanding Docker port mapping:**
+```
+docker-compose ports: "EXTERNAL:INTERNAL"
+                        ↓        ↓
+                    HOST port  CONTAINER port
+                    (outside)  (inside)
+```
+
+- `EXTERNAL` = port on the HOST machine - must be FREE on the host
+- `INTERNAL` = port inside the container - must match `DASHBOARD_PORT`
+- Access from Tailscale/network: `http://<host-ip>:EXTERNAL`
+
+**Fix:**
+
+```yaml
+# docker-compose.yml
+services:
+  dev:
+    ports:
+      - "9050:9050"   # Dashboard accessible on port 9050
+    environment:
+      - DASHBOARD_HOST=0.0.0.0  # Bind to ALL interfaces (required for Docker/Tailscale)
+      - DASHBOARD_PORT=9050     # Use a port FREE on host (not 5050!)
+```
+
+**Access (same for both inside and outside container):**
+- Local: `curl http://localhost:9050/health`
+- Tailscale: `http://<tailscale-ip>:9050`
+
+**Running OUTSIDE container (directly on host):**
+```bash
+DATABASE_URL=postgresql://predict:predict@localhost:5433/predict \
+DRY_RUN=false \
+python -m polymarket_bot.main
+```
+- Defaults: `DASHBOARD_HOST=0.0.0.0`, `DASHBOARD_PORT=9050`
+- No Docker port mapping needed - bot listens directly on host
+- Use `localhost:5433` for DB (the mapped PostgreSQL port)
+- Access via Tailscale: `http://<tailscale-ip>:9050`
+
+**Key lessons:**
+- `127.0.0.1` in Docker = only accessible from INSIDE that container
+- `0.0.0.0` = accessible from outside (host, network, Tailscale)
+- EXTERNAL port must be FREE on the HOST machine
+- INTERNAL port must match `DASHBOARD_PORT` env var
+- Check BOTH container AND host for port conflicts
+
+**Debug commands:**
+```bash
+# Check inside container
+curl http://localhost:5055/health
+
+# Check from host (after container recreation)
+curl http://localhost:9050/health
+
+# Check what's using a port on host
+lsof -i :5050  # or ss -tlnp | grep 5050
+
+# Check if dashboard started
+grep "Dashboard:" /tmp/bot.log
+```
+
+**Affected components:** monitoring/dashboard, docker-compose.yml
+
+---
+
+## G12: Stale Position Data ("Not Enough Balance" Bug)
+
+**What happened:** Exit sell orders failed with `not enough balance / allowance` even though wallet had tokens.
+
+**Root cause:** Positions were sold externally (via Polymarket website, another bot, or previous runs), but the database wasn't updated. Two scenarios:
+1. **Partial sells**: Bot tried to sell 20 shares when only 15 remained
+2. **Complete sells**: Bot tried to sell positions that no longer existed at all
+
+**Impact:**
+- Exit orders fail repeatedly with `PolyApiException[status_code=400]`
+- Positions at profit target (99.8¢) stuck indefinitely
+- "Not enough balance / allowance" errors in logs
+
+**Fix:** Added `quick_sync_sizes()` method that syncs position state from Polymarket Data API before exit evaluation:
+
+```python
+# Before evaluating exits, sync with Polymarket
+await execution_service.sync_position_sizes()
+
+# Data API returns actual on-chain positions
+GET https://data-api.polymarket.com/positions?user=0x...
+# Response: [{ "asset": "...", "size": 15.0 }, ...]
+```
+
+**What the sync does:**
+1. Fetches actual positions from Polymarket
+2. Updates size mismatches in DB (partial sells)
+3. Closes positions that no longer exist (complete sells)
+4. Updates in-memory PositionTracker cache
+
+**Key changes:**
+1. `PositionSyncService.quick_sync_sizes()` - Fast sync before exits
+2. `ExecutionService.sync_position_sizes()` - Wrapper with wallet address
+3. `BackgroundTasksManager` - Calls sync before exit evaluation (60s interval)
+4. `ExecutionConfig.wallet_address` - From `funder` in credentials
+
+**Also applies when:**
+- Positions manually sold on Polymarket website
+- Another bot/script sold positions
+- Markets resolved externally
+- Partial fills on previous exit attempts
+
+**Debug output:**
+```
+Quick sync: 10734760525... not found on Polymarket, marking closed
+Quick sync: updated 0 sizes, closed 4 missing positions
+```
+
+**Affected components:** execution/position_sync, execution/service, core/background_tasks
+
+---
+
 ## Adding New Gotchas
 
 When you discover a new production bug:
