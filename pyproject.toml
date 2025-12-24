@@ -69,6 +69,11 @@ asyncio_mode = "auto"
 addopts = "-v --tb=short"
 markers = [
     "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
+    "live: marks tests as live integration tests (deselect with '-m \"not live\"')",
+    "live_fill: marks tests that execute real fills (deselect with '-m \"not live_fill\"')",
+    "live_edge: marks tests for edge cases with real API (deselect with '-m \"not live_edge\"')",
+    "live_stress: marks stress tests with real API (deselect with '-m \"not live_stress\"')",
+    "live_resilience: marks resilience/recovery tests (deselect with '-m \"not live_resilience\"')",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
 ]
 
