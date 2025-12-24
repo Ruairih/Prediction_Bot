@@ -520,9 +520,22 @@ async def test_live_order_cancellation(live_order_setup: LiveOrderSetup):
         f"cancelling order {order_id}",
     )
 
-    order = await _sync_order(live_order_setup, order_id)
-    assert cancelled or order.status in (OrderStatus.CANCELLED, OrderStatus.FAILED)
-    assert order.status in (OrderStatus.CANCELLED, OrderStatus.FAILED)
+    # Wait for cancel to propagate to CLOB
+    await asyncio.sleep(2)
+
+    # Retry sync to confirm cancellation
+    order = None
+    for attempt in range(5):
+        order = await _sync_order(live_order_setup, order_id)
+        if order.status in (OrderStatus.CANCELLED, OrderStatus.FAILED):
+            break
+        logger.info(f"Cancel attempt {attempt + 1}: status={order.status}, waiting...")
+        await asyncio.sleep(1)
+
+    assert cancelled or order.status in (OrderStatus.CANCELLED, OrderStatus.FAILED), \
+        f"Cancel returned {cancelled}, but status is {order.status}"
+    assert order.status in (OrderStatus.CANCELLED, OrderStatus.FAILED), \
+        f"Order still {order.status} after cancel"
     assert not live_order_setup.balance_manager.has_reservation(order_id)
 
     post_available = live_order_setup.order_manager.get_available_balance()
