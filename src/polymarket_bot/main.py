@@ -346,6 +346,7 @@ class TradingBot:
         self._ingestion = IngestionService(
             config=ingestion_config,
             on_price_update=self._handle_price_update,
+            db=self._db,
         )
 
         await self._ingestion.start()

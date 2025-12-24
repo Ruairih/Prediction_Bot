@@ -59,6 +59,9 @@ def mock_clob_client():
         def get_order(self, order_id):
             pass
 
+        def cancel(self, order_id):
+            pass
+
         def cancel_order(self, order_id):
             pass
 
@@ -86,6 +89,7 @@ def mock_clob_client():
     }
 
     # Mock cancel
+    client.cancel.return_value = {"success": True}
     client.cancel_order.return_value = {"success": True}
 
     return client

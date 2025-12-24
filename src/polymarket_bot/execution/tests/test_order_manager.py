@@ -164,7 +164,7 @@ class TestOrderCancellation:
         result = await order_manager.cancel_order(order_id)
 
         assert result is True
-        mock_clob_client.cancel_order.assert_called_with(order_id)
+        mock_clob_client.cancel.assert_called_with(order_id)
 
     @pytest.mark.asyncio
     async def test_updates_status_on_cancel(self, order_manager, mock_clob_client, mock_db):

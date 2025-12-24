@@ -68,6 +68,18 @@ See `polymarket_api_creds.json.example` in the project root:
 }
 ```
 
+### CLOB Client API Notes
+
+**Order Cancellation**: Use `client.cancel(order_id)` not `cancel_order()`. The py-clob-client SDK method is `cancel()`.
+
+```python
+# Correct
+client.cancel(order_id)
+
+# Wrong - this method doesn't exist
+client.cancel_order(order_id)
+```
+
 ## Directory Structure
 
 ```

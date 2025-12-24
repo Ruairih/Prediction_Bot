@@ -156,6 +156,7 @@ class IngestionService:
         self,
         config: Optional[IngestionConfig] = None,
         on_price_update: Optional[EventCallback] = None,
+        db: Optional[Any] = None,
     ):
         """
         Initialize the ingestion service.
@@ -163,9 +164,11 @@ class IngestionService:
         Args:
             config: Service configuration
             on_price_update: Optional callback for price updates
+            db: Optional database reference for health checking
         """
         self._config = config or IngestionConfig()
         self._external_callback = on_price_update
+        self._db = db
 
         # State
         self._state = ServiceState.STOPPED
@@ -446,7 +449,7 @@ class IngestionService:
             websocket_state=ws_state,
             websocket_connected=ws_connected,
             last_message_age_seconds=last_msg_age,
-            database_connected=True,  # TODO: Check DB connection
+            database_connected=self._db.is_connected if self._db else True,
             errors_last_hour=metrics.errors_last_hour if metrics else 0,
             subscribed_markets=subscribed,
             events_per_second=metrics.events_per_second if metrics else 0.0,

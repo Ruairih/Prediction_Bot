@@ -319,19 +319,247 @@ python -m polymarket_bot.main
 **Debug commands:**
 ```bash
 # Check inside container
-curl http://localhost:5055/health
+curl http://localhost:9050/health
 
 # Check from host (after container recreation)
 curl http://localhost:9050/health
 
 # Check what's using a port on host
-lsof -i :5050  # or ss -tlnp | grep 5050
+lsof -i :9050  # or ss -tlnp | grep 9050
 
 # Check if dashboard started
 grep "Dashboard:" /tmp/bot.log
 ```
 
 **Affected components:** monitoring/dashboard, docker-compose.yml
+
+---
+
+## G11b: Docker + Tailscale Networking (Dashboard Not Accessible via Tailscale)
+
+**What happened:** Dashboard accessible via `curl localhost:9050` on host, but NOT accessible via `http://<tailscale-ip>:9050` from other Tailnet machines.
+
+**Root cause:** Tailscale runs on the HOST (not inside Docker). Docker bridge networking uses NAT. Traffic from `tailscale0` interface to `docker0` bridge is blocked by default iptables/firewall rules.
+
+```
+Other Tailscale machine
+        │
+        ▼
+   tailscale0 (host)     ← Tailscale traffic arrives here
+        │
+        ╳ BLOCKED        ← iptables FORWARD chain blocks by default
+        │
+   docker0 (bridge)
+        │
+        ▼
+   container:9050
+```
+
+**Solutions (pick one):**
+
+### Solution 1: `network_mode: host` (Easiest)
+
+Container shares host's network stack directly - no NAT, no forwarding issues:
+
+```yaml
+# docker-compose.yml
+services:
+  dev:
+    network_mode: host  # Container uses host network directly
+    environment:
+      - DASHBOARD_HOST=0.0.0.0
+      - DASHBOARD_PORT=9050
+    # NOTE: "ports:" section is ignored with network_mode: host
+```
+
+**Trade-offs:**
+- ✅ Works immediately with Tailscale
+- ❌ Container can access all host ports (less isolation)
+- ❌ Port conflicts with host services possible
+
+### Solution 2: `tailscale serve` (Elegant, No Docker Changes)
+
+Use Tailscale's built-in proxy to forward traffic:
+
+```bash
+# On the HOST machine (not inside container)
+tailscale serve --bg --tcp 9050 tcp://localhost:9050
+
+# Or for HTTPS with automatic cert:
+tailscale serve --bg --https 443 http://localhost:9050
+```
+
+**Trade-offs:**
+- ✅ No Docker config changes needed
+- ✅ Optional automatic HTTPS with Tailscale certs
+- ❌ Extra process to manage
+- ❌ Need to remember to start after reboot
+
+**For multiple ports (all dashboards):**
+```bash
+# Flask trading dashboard (port 9050)
+sudo tailscale serve --bg --tcp 9050 tcp://localhost:9050
+
+# React trading dashboard (port 3000)
+sudo tailscale serve --bg --tcp 3000 tcp://localhost:3000
+
+# Ingestion monitoring dashboard (port 8081)
+sudo tailscale serve --bg --tcp 8081 tcp://localhost:8081
+
+# Check active serves
+tailscale serve status
+```
+
+### Solution 3: iptables Rules (Keep Bridge Mode)
+
+Allow forwarding from Tailscale to Docker:
+
+```bash
+# Enable IP forwarding
+sudo sysctl -w net.ipv4.ip_forward=1
+
+# Allow traffic from tailscale0 to docker0
+sudo iptables -I DOCKER-USER -i tailscale0 -o docker0 -p tcp --dport 9050 -j ACCEPT
+sudo iptables -I DOCKER-USER -i docker0 -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+```
+
+For UFW users:
+```bash
+# In /etc/ufw/before.rules, add:
+-A ufw-before-forward -i tailscale0 -o docker0 -p tcp --dport 9050 -j ACCEPT
+-A ufw-before-forward -i docker0 -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+```
+
+**Trade-offs:**
+- ✅ Keeps Docker bridge isolation
+- ❌ Complex iptables rules
+- ❌ Rules may reset on reboot (need persistence)
+
+### Solution 4: Bind to Tailscale IP Explicitly
+
+```yaml
+# docker-compose.yml - bind port to Tailscale IP specifically
+ports:
+  - "100.x.y.z:9050:9050"  # Replace with your Tailscale IP
+```
+
+**Trade-offs:**
+- ✅ Explicit, clear binding
+- ❌ IP may change (use `tailscale ip -4` to check)
+- ❌ Still needs iptables forwarding rules
+
+**Recommended approach:**
+
+1. **For development:** Use `network_mode: host` (simplest)
+2. **For production:** Use `tailscale serve` (cleanest, no firewall changes)
+3. **For complex setups:** Configure iptables rules properly
+
+**Debug commands:**
+```bash
+# Check if Tailscale is in userspace mode (problematic for Docker)
+tailscale debug prefs | grep -i tun
+
+# Check iptables FORWARD chain
+sudo iptables -L FORWARD -n -v
+sudo iptables -L DOCKER-USER -n -v
+
+# Test from host to container
+curl http://localhost:9050/health
+
+# Test Tailscale connectivity (from another machine)
+curl http://<tailscale-ip>:9050/health
+```
+
+**Affected components:** docker-compose.yml, host firewall configuration
+
+---
+
+## G11c: Dashboard Options (Flask vs React vs Ingestion)
+
+There are **three dashboard options**:
+
+### 1. Flask HTML Dashboard (Simple, Built-in)
+
+Automatically started with the bot on port 9050. Basic dark-themed HTML page.
+
+- **Endpoints:** `/health`, `/api/positions`, `/api/metrics`, `/api/triggers`, `/api/watchlist`
+- **HTML Page:** `http://<ip>:9050/`
+- **No extra setup needed** - starts with the bot
+
+### 2. React Dashboard (Full-Featured, Separate)
+
+Modern React/TypeScript dashboard with multiple pages. Requires separate startup.
+
+**To start (inside container):**
+```bash
+cd /workspace/dashboard
+npm run dev
+```
+
+**Access:** `http://<ip>:3000/`
+
+**Features:**
+- Overview with KPI tiles
+- Positions table
+- Activity/trade history
+- Performance charts
+- Strategy configuration
+- Risk metrics
+- System health
+
+**Configuration (`dashboard/vite.config.ts`):**
+- Proxies `/api` and `/health` to Flask backend (port 9050)
+- Binds to `0.0.0.0:3000` for network access
+
+**For Tailscale access, run on HOST:**
+```bash
+sudo tailscale serve --bg --tcp 3000 tcp://localhost:3000
+```
+
+### 3. Ingestion Dashboard (Data Flow Monitoring)
+
+FastAPI dashboard showing real-time data ingestion metrics. Requires separate startup.
+
+**To start (inside container):**
+```bash
+python scripts/run_ingestion.py
+```
+
+**Access:** `http://<ip>:8081/`
+
+**Features:**
+- WebSocket connection status
+- Data flow metrics (events/sec, trades stored)
+- Gotcha protection stats (G1 stale filtered, G3 backfill, G5 divergence)
+- Recent events table with live updates
+- Real-time WebSocket streaming at `/ws/live`
+
+**Endpoints:**
+- `/` - HTML dashboard
+- `/health` - Health check
+- `/api/metrics` - Ingestion metrics
+- `/api/events` - Recent processed events
+- `/api/status` - Service status
+- `/ws/live` - WebSocket for real-time updates
+
+**For Tailscale access, run on HOST:**
+```bash
+sudo tailscale serve --bg --tcp 8081 tcp://localhost:8081
+```
+
+**Starting all dashboards together:**
+```bash
+# Terminal 1: Start bot (includes Flask dashboard on 9050)
+DATABASE_URL=postgresql://predict:predict@postgres:5432/predict python -m polymarket_bot.main
+
+# Terminal 2: Start React dashboard on 3000
+cd /workspace/dashboard && npm run dev
+
+# Terminal 3: Start Ingestion dashboard on 8081
+python scripts/run_ingestion.py
+```
+
+**Affected components:** monitoring/dashboard.py, dashboard/, ingestion/dashboard.py
 
 ---
 

@@ -537,7 +537,18 @@ See `docs/reference/README.md` for how to use that folder.
 | `DASHBOARD_PORT` | `9050` | Dashboard port (use a port FREE on your host - see G11) |
 | `DASHBOARD_API_KEY` | (optional) | API key for dashboard authentication |
 
-**Note on Dashboard (G11):** Default port is 9050. Access via Tailscale: `http://<tailscale-ip>:9050`. Works the same inside Docker or running directly on host. See `docs/reference/known_gotchas.md#g11` for details.
+**Note on Dashboards (G11/G11b/G11c):** Three dashboards available:
+1. **Flask Dashboard** (port 9050) - Basic trading metrics, starts with bot
+2. **React Dashboard** (port 3000) - Full trading UI: `cd dashboard && npm run dev`
+3. **Ingestion Dashboard** (port 8081) - Data flow monitoring: `python scripts/run_ingestion.py`
+
+For Tailscale access from Docker, run on HOST:
+```bash
+sudo tailscale serve --bg --tcp 9050 tcp://localhost:9050  # Flask trading
+sudo tailscale serve --bg --tcp 3000 tcp://localhost:3000  # React trading
+sudo tailscale serve --bg --tcp 8081 tcp://localhost:8081  # Ingestion
+```
+See `docs/reference/known_gotchas.md#g11b` and `#g11c` for details.
 
 ### Setup Instructions
 

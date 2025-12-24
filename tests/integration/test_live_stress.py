@@ -40,6 +40,7 @@ import pytest
 from polymarket_bot.execution import (
     BalanceConfig,
     BalanceManager,
+    Order,
     OrderConfig,
     OrderManager,
     OrderStatus,
@@ -142,6 +143,21 @@ async def _with_timeout(coro, description: str, timeout: float = TIMEOUT_SECONDS
         pytest.fail(f"Timed out: {description}")
 
 
+async def _sync_order(context: "StressTestContext", order_id: str) -> Order:
+    last_exc: Optional[Exception] = None
+    for attempt in range(3):
+        try:
+            return await _with_timeout(
+                context.order_manager.sync_order_status(order_id),
+                f"syncing order {order_id} (attempt {attempt + 1})",
+            )
+        except Exception as exc:
+            last_exc = exc
+            if attempt < 2:
+                await asyncio.sleep(1)
+    raise last_exc if last_exc else RuntimeError("Order sync failed unexpectedly")
+
+
 class _NullDatabase:
     async def execute(self, *args, **kwargs):
         return "OK"
@@ -213,10 +229,13 @@ class StressTestContext:
     metrics: StressTestMetrics = field(default_factory=StressTestMetrics)
     order_ids: List[str] = field(default_factory=list)
     current_exposure: Decimal = Decimal("0")
+    expected_fill_order_ids: set[str] = field(default_factory=set)
 
-    def track_order(self, order_id: str, cost: Decimal) -> None:
+    def track_order(self, order_id: str, cost: Decimal, allow_fill: bool = False) -> None:
         self.order_ids.append(order_id)
         self.current_exposure += cost
+        if allow_fill:
+            self.expected_fill_order_ids.add(order_id)
 
     def can_submit_more(self) -> bool:
         return self.current_exposure < MAX_TOTAL_EXPOSURE
@@ -373,15 +392,84 @@ async def stress_context(clob_client, rest_client) -> StressTestContext:
 
     # Cleanup: cancel all orders
     logger.info(f"Cleaning up {len(context.order_ids)} orders...")
+    filled_orders: list[Order] = []
+    open_orders: list[str] = []
     for order_id in context.order_ids:
+        order: Optional[Order] = None
         try:
-            await order_manager.cancel_order(order_id)
+            await _with_timeout(
+                order_manager.cancel_order(order_id),
+                f"cancelling order {order_id}",
+            )
             context.metrics.orders_cancelled += 1
-        except Exception as e:
-            logger.warning(f"Failed to cancel {order_id}: {e}")
+        except Exception as exc:
+            logger.warning("Failed to cancel %s: %s", order_id, exc)
+
+        # Wait for cancel to propagate
+        await asyncio.sleep(2)
+
+        final_status = None
+        for attempt in range(3):
+            try:
+                order = await _with_timeout(
+                    order_manager.sync_order_status(order_id),
+                    f"syncing order {order_id} (attempt {attempt + 1})",
+                )
+                final_status = order.status
+                if order.status == OrderStatus.CANCELLED:
+                    break
+                await asyncio.sleep(1)
+            except Exception as exc:
+                logger.warning("Failed to sync order %s: %s", order_id, exc)
+                break
+
+        if final_status in (OrderStatus.FILLED, OrderStatus.PARTIAL):
+            if order:
+                filled_orders.append(order)
+            else:
+                logger.warning(
+                    "Order %s filled but no order details available for cleanup",
+                    order_id,
+                )
+        elif final_status in (OrderStatus.PENDING, OrderStatus.LIVE):
+            open_orders.append(order_id)
+
+    closed_positions: list[str] = []
+    failed_position_closures: list[str] = []
+    if filled_orders:
+        closed_positions, failed_position_closures = await _close_filled_positions(
+            context,
+            rest_client,
+            filled_orders,
+        )
+        logger.info(
+            "Position cleanup summary: closed=%s failed=%s",
+            closed_positions,
+            failed_position_closures,
+        )
 
     # Log metrics
     context.metrics.log_summary()
+
+    if failed_position_closures:
+        pytest.fail(
+            "Live test orders filled and position cleanup failed: "
+            f"failed_closures={failed_position_closures}"
+        )
+
+    unexpected_filled_orders = [
+        order.order_id
+        for order in filled_orders
+        if order.order_id not in context.expected_fill_order_ids
+    ]
+    if unexpected_filled_orders:
+        pytest.fail(
+            "Live test orders filled unexpectedly: "
+            f"{unexpected_filled_orders} (positions closed: {closed_positions})"
+        )
+
+    if open_orders:
+        pytest.fail(f"Live test orders left open after cleanup: {open_orders}")
 
     # Verify balance recovery
     ending_balance = order_manager.refresh_balance()
@@ -390,6 +478,154 @@ async def stress_context(clob_client, rest_client) -> StressTestContext:
         logger.warning(
             f"Balance decreased: ${starting_balance} -> ${ending_balance}"
         )
+
+
+async def _close_filled_positions(
+    context: StressTestContext,
+    rest_client: PolymarketRestClient,
+    filled_orders: list[Order],
+) -> tuple[list[str], list[str]]:
+    closed_positions: list[str] = []
+    failed_positions: list[str] = []
+
+    for filled_order in filled_orders:
+        side = filled_order.side.upper()
+        if side != "BUY":
+            logger.warning(
+                "Skipping position close for order %s with side %s",
+                filled_order.order_id,
+                filled_order.side,
+            )
+            failed_positions.append(filled_order.order_id)
+            continue
+
+        if filled_order.filled_size > 0:
+            close_size = filled_order.filled_size
+        else:
+            close_size = filled_order.size
+        if close_size <= 0:
+            logger.warning(
+                "Filled order %s has no size available to close",
+                filled_order.order_id,
+            )
+            failed_positions.append(filled_order.order_id)
+            continue
+
+        token_id = filled_order.token_id
+        condition_id = filled_order.condition_id
+        if not token_id or not condition_id:
+            params = getattr(context, "params", None)
+            token_id = token_id or getattr(params, "token_id", None)
+            condition_id = condition_id or getattr(params, "condition_id", None)
+        if not token_id or not condition_id:
+            logger.warning(
+                "Filled order %s missing token/condition id for cleanup",
+                filled_order.order_id,
+            )
+            failed_positions.append(filled_order.order_id)
+            continue
+
+        try:
+            orderbook = await _with_timeout(
+                rest_client.get_orderbook(token_id),
+                f"fetching orderbook for close of {filled_order.order_id}",
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to fetch orderbook for close of %s: %s",
+                filled_order.order_id,
+                exc,
+            )
+            failed_positions.append(filled_order.order_id)
+            continue
+
+        if orderbook.best_bid is None:
+            logger.warning(
+                "No best bid available to close filled order %s",
+                filled_order.order_id,
+            )
+            failed_positions.append(filled_order.order_id)
+            continue
+
+        close_price = orderbook.best_bid
+        try:
+            close_order_id = await _with_timeout(
+                context.order_manager.submit_order(
+                    token_id=token_id,
+                    side="SELL",
+                    price=close_price,
+                    size=close_size,
+                    condition_id=condition_id,
+                ),
+                f"submitting close order for {filled_order.order_id}",
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to submit close SELL for %s: %s",
+                filled_order.order_id,
+                exc,
+            )
+            failed_positions.append(filled_order.order_id)
+            continue
+
+        logger.info(
+            "Submitted close SELL order %s for filled order %s (size=%s price=%s)",
+            close_order_id,
+            filled_order.order_id,
+            close_size,
+            close_price,
+        )
+
+        await asyncio.sleep(2)
+
+        close_order = None
+        close_status = None
+        for attempt in range(3):
+            try:
+                close_order = await _sync_order(context, close_order_id)
+                close_status = close_order.status
+                if close_status in (
+                    OrderStatus.FILLED,
+                    OrderStatus.PARTIAL,
+                    OrderStatus.CANCELLED,
+                    OrderStatus.FAILED,
+                ):
+                    break
+                await asyncio.sleep(1)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to sync close order %s: %s",
+                    close_order_id,
+                    exc,
+                )
+                break
+
+        status_label = close_status.value if close_status else "unknown"
+        if close_status == OrderStatus.FILLED:
+            logger.info(
+                "Closed position for order %s with close order %s",
+                filled_order.order_id,
+                close_order_id,
+            )
+            closed_positions.append(filled_order.order_id)
+        elif close_status == OrderStatus.PARTIAL:
+            logger.warning(
+                "Close order %s for %s partially filled (filled_size=%s)",
+                close_order_id,
+                filled_order.order_id,
+                close_order.filled_size if close_order else "unknown",
+            )
+            failed_positions.append(filled_order.order_id)
+        else:
+            logger.warning(
+                "Close order %s for %s not filled (status=%s)",
+                close_order_id,
+                filled_order.order_id,
+                status_label,
+            )
+            failed_positions.append(filled_order.order_id)
+
+    return closed_positions, failed_positions
 
 
 # =============================================================================

@@ -39,6 +39,7 @@ import pytest
 from polymarket_bot.execution import (
     BalanceConfig,
     BalanceManager,
+    Order,
     OrderConfig,
     OrderManager,
     OrderStatus,
@@ -211,6 +212,7 @@ class TradeRecord:
     price: Decimal
     size: Decimal
     status: OrderStatus
+    allow_fill: bool = False
     filled_size: Decimal = Decimal("0")
     avg_fill_price: Optional[Decimal] = None
     created_at: float = field(default_factory=time.time)
@@ -469,6 +471,7 @@ async def fill_test_context(clob_client, rest_client) -> LiveFillTestContext:
                 logger.warning(f"Failed to cancel order {trade.order_id}: {e}")
 
     # Sync all orders to get final status
+    synced_orders: dict[str, Order] = {}
     for trade in context.trades:
         try:
             order = await _with_timeout(
@@ -476,6 +479,7 @@ async def fill_test_context(clob_client, rest_client) -> LiveFillTestContext:
                 f"syncing order {trade.order_id}",
                 timeout=15,
             )
+            synced_orders[trade.order_id] = order
             trade.status = order.status
             trade.filled_size = order.filled_size
             trade.avg_fill_price = order.avg_fill_price
@@ -483,48 +487,54 @@ async def fill_test_context(clob_client, rest_client) -> LiveFillTestContext:
         except Exception as e:
             logger.warning(f"Failed to sync order {trade.order_id}: {e}")
 
-    # Sell any acquired positions
-    for trade in context.trades:
-        if trade.side == "BUY" and trade.filled_size > Decimal("0"):
-            try:
-                # Get current best bid to sell at
-                orderbook = await _with_timeout(
-                    rest_client.get_orderbook(trade.token_id),
-                    f"fetching orderbook for cleanup sell",
-                    timeout=10,
-                )
+    filled_orders: list[Order] = []
+    open_orders: list[str] = []
+    for order_id, order in synced_orders.items():
+        if order.status in (OrderStatus.FILLED, OrderStatus.PARTIAL):
+            if order.side.upper() == "BUY":
+                filled_orders.append(order)
+        elif order.status in (OrderStatus.PENDING, OrderStatus.LIVE):
+            open_orders.append(order_id)
 
-                if orderbook.best_bid and orderbook.best_bid > Decimal("0"):
-                    sell_price = orderbook.best_bid
-                    sell_size = trade.filled_size
+    closed_positions: list[str] = []
+    failed_position_closures: list[str] = []
+    if filled_orders:
+        closed_positions, failed_position_closures = await _close_filled_positions(
+            context,
+            rest_client,
+            filled_orders,
+        )
+        logger.info(
+            "Position cleanup summary: closed=%s failed=%s",
+            closed_positions,
+            failed_position_closures,
+        )
 
-                    logger.info(f"Cleanup: Selling {sell_size} of {trade.token_id[:16]}... @ {sell_price}")
+    if failed_position_closures:
+        logger.warning(
+            "Position cleanup failed for orders: %s",
+            failed_position_closures,
+        )
 
-                    sell_order_id = await _with_timeout(
-                        order_manager.submit_order(
-                            token_id=trade.token_id,
-                            side="SELL",
-                            price=sell_price,
-                            size=sell_size,
-                            condition_id=trade.condition_id,
-                        ),
-                        "submitting cleanup sell order",
-                        timeout=30,
-                    )
+    expected_fill_orders = {trade.order_id for trade in context.trades if trade.allow_fill}
+    unexpected_filled_orders = [
+        order.order_id
+        for order in filled_orders
+        if order.order_id not in expected_fill_orders
+    ]
+    if unexpected_filled_orders:
+        if failed_position_closures:
+            pytest.fail(
+                "Live test orders filled unexpectedly and position cleanup failed: "
+                f"filled={unexpected_filled_orders}, failed_closures={failed_position_closures}"
+            )
+        pytest.fail(
+            "Live test orders filled unexpectedly: "
+            f"{unexpected_filled_orders} (positions closed: {closed_positions})"
+        )
 
-                    # Wait for sell to fill
-                    await asyncio.sleep(FILL_WAIT_SECONDS)
-
-                    # Cancel if not filled
-                    try:
-                        await order_manager.cancel_order(sell_order_id)
-                    except Exception:
-                        pass
-
-                    logger.info(f"Cleanup sell order: {sell_order_id}")
-
-            except Exception as e:
-                logger.error(f"Failed cleanup sell for {trade.token_id}: {e}")
+    if open_orders:
+        pytest.fail(f"Live test orders left open after cleanup: {open_orders}")
 
     # Final balance check
     ending_balance = order_manager.refresh_balance()
@@ -534,6 +544,169 @@ async def fill_test_context(clob_client, rest_client) -> LiveFillTestContext:
     # Warn if significant loss (but don't fail - trades may have spread cost)
     if balance_change < -MAX_ORDER_COST:
         logger.warning(f"Significant balance loss during test: ${balance_change}")
+
+
+async def _sync_order(context: LiveFillTestContext, order_id: str) -> Order:
+    last_exc: Optional[Exception] = None
+    for attempt in range(3):
+        try:
+            return await _with_timeout(
+                context.order_manager.sync_order_status(order_id),
+                f"syncing order {order_id} (attempt {attempt + 1})",
+            )
+        except Exception as exc:
+            last_exc = exc
+            if attempt < 2:
+                await asyncio.sleep(1)
+    raise last_exc if last_exc else RuntimeError("Order sync failed unexpectedly")
+
+
+async def _close_filled_positions(
+    context: LiveFillTestContext,
+    rest_client: PolymarketRestClient,
+    filled_orders: list[Order],
+) -> tuple[list[str], list[str]]:
+    closed_positions: list[str] = []
+    failed_positions: list[str] = []
+
+    for filled_order in filled_orders:
+        side = filled_order.side.upper()
+        if side != "BUY":
+            logger.warning(
+                "Skipping position close for order %s with side %s",
+                filled_order.order_id,
+                filled_order.side,
+            )
+            failed_positions.append(filled_order.order_id)
+            continue
+
+        if filled_order.filled_size > 0:
+            close_size = filled_order.filled_size
+        else:
+            close_size = filled_order.size
+        if close_size <= 0:
+            logger.warning(
+                "Filled order %s has no size available to close",
+                filled_order.order_id,
+            )
+            failed_positions.append(filled_order.order_id)
+            continue
+
+        token_id = filled_order.token_id
+        condition_id = filled_order.condition_id
+        if not token_id or not condition_id:
+            params = getattr(context, "params", None)
+            token_id = token_id or getattr(params, "token_id", None)
+            condition_id = condition_id or getattr(params, "condition_id", None)
+        if not token_id or not condition_id:
+            logger.warning(
+                "Filled order %s missing token/condition id for cleanup",
+                filled_order.order_id,
+            )
+            failed_positions.append(filled_order.order_id)
+            continue
+
+        try:
+            orderbook = await _with_timeout(
+                rest_client.get_orderbook(token_id),
+                f"fetching orderbook for close of {filled_order.order_id}",
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to fetch orderbook for close of %s: %s",
+                filled_order.order_id,
+                exc,
+            )
+            failed_positions.append(filled_order.order_id)
+            continue
+
+        if orderbook.best_bid is None:
+            logger.warning(
+                "No best bid available to close filled order %s",
+                filled_order.order_id,
+            )
+            failed_positions.append(filled_order.order_id)
+            continue
+
+        close_price = orderbook.best_bid
+        try:
+            close_order_id = await _with_timeout(
+                context.order_manager.submit_order(
+                    token_id=token_id,
+                    side="SELL",
+                    price=close_price,
+                    size=close_size,
+                    condition_id=condition_id,
+                ),
+                f"submitting close order for {filled_order.order_id}",
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to submit close SELL for %s: %s",
+                filled_order.order_id,
+                exc,
+            )
+            failed_positions.append(filled_order.order_id)
+            continue
+
+        logger.info(
+            "Submitted close SELL order %s for filled order %s (size=%s price=%s)",
+            close_order_id,
+            filled_order.order_id,
+            close_size,
+            close_price,
+        )
+
+        await asyncio.sleep(2)
+
+        close_order = None
+        close_status = None
+        for attempt in range(3):
+            try:
+                close_order = await _sync_order(context, close_order_id)
+                close_status = close_order.status
+                if close_status in (
+                    OrderStatus.FILLED,
+                    OrderStatus.PARTIAL,
+                    OrderStatus.CANCELLED,
+                    OrderStatus.FAILED,
+                ):
+                    break
+                await asyncio.sleep(1)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to sync close order %s: %s",
+                    close_order_id,
+                    exc,
+                )
+                break
+
+        status_label = close_status.value if close_status else "unknown"
+        if close_status == OrderStatus.FILLED:
+            logger.info(
+                "Closed position for order %s with close order %s",
+                filled_order.order_id,
+                close_order_id,
+            )
+            closed_positions.append(filled_order.order_id)
+        elif close_status == OrderStatus.PARTIAL:
+            logger.warning(
+                "Close order %s for %s partially filled (filled_size=%s)",
+                close_order_id,
+                filled_order.order_id,
+                close_order.filled_size if close_order else "unknown",
+            )
+            failed_positions.append(filled_order.order_id)
+        else:
+            logger.warning(
+                "Close order %s for %s not filled (status=%s)",
+                close_order_id,
+                filled_order.order_id,
+                status_label,
+            )
+            failed_positions.append(filled_order.order_id)
+
+    return closed_positions, failed_positions
 
 
 # =============================================================================
@@ -596,6 +769,7 @@ async def submit_buy_at_ask(
         price=price,
         size=size,
         status=OrderStatus.PENDING,
+        allow_fill=True,
     )
     context.record_trade(trade)
 
@@ -675,6 +849,7 @@ async def submit_sell_at_bid(
         price=price,
         size=size,
         status=OrderStatus.PENDING,
+        allow_fill=True,
     )
     context.record_trade(trade)
 
@@ -1066,6 +1241,7 @@ class TestLiveBalanceReservations:
             price=low_price,
             size=size,
             status=OrderStatus.PENDING,
+            allow_fill=False,
         )
         ctx.record_trade(trade)
 
