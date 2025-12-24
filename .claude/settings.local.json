@@ -36,7 +36,10 @@
       "Bash(bash:*)",
       "Bash(sudo systemctl restart:*)",
       "Bash(docker compose:*)",
-      "Bash(psql:*)"
+      "Bash(psql:*)",
+      "mcp__codex__codex",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
     ]
   }
 }

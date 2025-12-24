@@ -19,9 +19,8 @@ services:
       - /home/z/Projects/Firinne/Github/PredictionM/nextgen_pipeline/data/guardrail.sqlite:/data/guardrail.sqlite:ro
     ports:
       - "3000:3000"
-      - "5051:8080"   # Dashboard: external 5051 → internal 8080
+      - "9050:9050"   # Dashboard: Tailscale access at http://<ip>:9050
       - "8000:8000"
-      - "8080:8080"   # Dashboard: also accessible on 8080
     environment:
       - DATABASE_URL=postgresql://predict:predict@postgres:5432/predict
       - REDIS_URL=redis://redis:6379
@@ -29,6 +28,7 @@ services:
       - NODE_OPTIONS=--dns-result-order=ipv4first
       - ANTHROPIC_TIMEOUT=120000
       - DASHBOARD_HOST=0.0.0.0
+      - DASHBOARD_PORT=9050
     depends_on:
       postgres:
         condition: service_healthy

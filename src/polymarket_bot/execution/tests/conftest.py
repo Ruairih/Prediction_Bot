@@ -159,7 +159,9 @@ def filled_order():
 
 @pytest.fixture
 def sample_position():
-    """Standard position."""
+    """Standard position with known age."""
+    now = datetime.now(timezone.utc)
+    entry_time = now - timedelta(days=3)
     return Position(
         position_id="pos_123",
         token_id="tok_yes_abc",
@@ -167,13 +169,17 @@ def sample_position():
         size=Decimal("20"),
         entry_price=Decimal("0.95"),
         entry_cost=Decimal("19.00"),
-        entry_time=datetime.now(timezone.utc) - timedelta(days=3),
+        entry_time=entry_time,
+        hold_start_at=entry_time,
+        age_source="bot_created",  # Known age for exit logic
     )
 
 
 @pytest.fixture
 def long_held_position():
     """Position held > 7 days (exit strategy applies)."""
+    now = datetime.now(timezone.utc)
+    entry_time = now - timedelta(days=10)
     return Position(
         position_id="pos_old",
         token_id="tok_yes_abc",
@@ -181,13 +187,17 @@ def long_held_position():
         size=Decimal("20"),
         entry_price=Decimal("0.95"),
         entry_cost=Decimal("19.00"),
-        entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        entry_time=entry_time,
+        hold_start_at=entry_time,
+        age_source="bot_created",  # Known age for exit logic
     )
 
 
 @pytest.fixture
 def short_held_position():
     """Position held < 7 days (hold to resolution)."""
+    now = datetime.now(timezone.utc)
+    entry_time = now - timedelta(days=2)
     return Position(
         position_id="pos_new",
         token_id="tok_yes_abc",
@@ -195,7 +205,9 @@ def short_held_position():
         size=Decimal("20"),
         entry_price=Decimal("0.95"),
         entry_cost=Decimal("19.00"),
-        entry_time=datetime.now(timezone.utc) - timedelta(days=2),
+        entry_time=entry_time,
+        hold_start_at=entry_time,
+        age_source="bot_created",  # Known age for exit logic
     )
 
 

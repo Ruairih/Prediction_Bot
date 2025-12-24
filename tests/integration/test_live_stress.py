@@ -30,7 +30,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from pathlib import Path
 from typing import Any, Optional, List
 from datetime import datetime, timezone
@@ -61,12 +61,14 @@ CREDS_ENV_VAR = "POLYMARKET_CREDS_PATH"
 DEFAULT_CREDS_PATH = "polymarket_api_creds.json"
 
 # Stress test limits
-MAX_TOTAL_EXPOSURE = Decimal("2.00")  # Max $2 total across all orders
+MAX_TOTAL_EXPOSURE = Decimal("10.00")  # Max $10 total across all orders
 MAX_ORDERS_PER_BURST = 5
 BURST_INTERVAL_SECONDS = 1.0
 ORDER_RATE_LIMIT_SECONDS = 0.2  # Min time between orders
 TIMEOUT_SECONDS = 60
 
+# Order constraints - Polymarket requires minimum $1 order value
+MIN_ORDER_COST = Decimal("1.00")  # CLOB minimum
 MIN_PRICE = Decimal("0.01")
 MAX_PRICE = Decimal("0.99")
 
@@ -123,6 +125,14 @@ def _quantize(value: Decimal, step: Decimal, rounding) -> Decimal:
     if step <= 0:
         return value
     return (value / step).to_integral_value(rounding=rounding) * step
+
+
+def _min_size_for_cost(price: Decimal, min_cost: Decimal = MIN_ORDER_COST) -> Decimal:
+    """Compute minimum size to meet minimum order cost requirement."""
+    if price <= 0:
+        return Decimal("100")  # Fallback for safety
+    raw = min_cost / price
+    return _quantize(raw, Decimal("0.01"), ROUND_UP)
 
 
 async def _with_timeout(coro, description: str, timeout: float = TIMEOUT_SECONDS):
@@ -226,7 +236,7 @@ class StressTestMarket:
 # Fixtures
 # =============================================================================
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def live_creds() -> dict[str, Any]:
     creds_path = Path(os.environ.get(CREDS_ENV_VAR, DEFAULT_CREDS_PATH))
     creds = _load_creds(creds_path)
@@ -234,7 +244,7 @@ def live_creds() -> dict[str, Any]:
     return creds
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def clob_client(live_creds):
     try:
         from py_clob_client.client import ClobClient
@@ -256,13 +266,13 @@ def clob_client(live_creds):
     )
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 async def rest_client():
     async with PolymarketRestClient(timeout=TIMEOUT_SECONDS) as client:
         yield client
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 async def stress_markets(rest_client) -> List[StressTestMarket]:
     """Find multiple markets for stress testing."""
     markets = []
@@ -312,7 +322,7 @@ async def stress_markets(rest_client) -> List[StressTestMarket]:
                 token_id=token.token_id,
                 condition_id=market.condition_id,
                 safe_price=safe_price,
-                min_size=_to_decimal(metadata.get("minOrderSize")) or Decimal("1"),
+                min_size=max(_to_decimal(metadata.get("minOrderSize")) or Decimal("5"), Decimal("5")),
                 tick_size=_to_decimal(metadata.get("tickSize")) or Decimal("0.01"),
             ))
 
@@ -416,7 +426,9 @@ class TestRapidOrderSubmission:
                 logger.info("Exposure limit reached")
                 break
 
-            cost = market.safe_price * market.min_size
+            # Ensure size meets minimum order cost ($1)
+            size = max(market.min_size, _min_size_for_cost(market.safe_price))
+            cost = market.safe_price * size
 
             start = time.time()
             try:
@@ -425,7 +437,7 @@ class TestRapidOrderSubmission:
                         token_id=market.token_id,
                         side="BUY",
                         price=market.safe_price,
-                        size=market.min_size,
+                        size=size,
                         condition_id=market.condition_id,
                     ),
                     f"submitting order {i}",
@@ -480,13 +492,15 @@ class TestConcurrentSyncs:
             if not ctx.can_submit_more():
                 break
 
-            cost = market.safe_price * market.min_size
+            # Ensure size meets minimum order cost ($1)
+            size = max(market.min_size, _min_size_for_cost(market.safe_price))
+            cost = market.safe_price * size
             try:
                 order_id = await ctx.order_manager.submit_order(
                     token_id=market.token_id,
                     side="BUY",
                     price=market.safe_price,
-                    size=market.min_size,
+                    size=size,
                     condition_id=market.condition_id,
                 )
                 ctx.track_order(order_id, cost)
@@ -605,14 +619,16 @@ class TestMultiMarketOperations:
             if not ctx.can_submit_more():
                 return None
 
-            cost = market.safe_price * market.min_size
+            # Ensure size meets minimum order cost ($1)
+            size = max(market.min_size, _min_size_for_cost(market.safe_price))
+            cost = market.safe_price * size
 
             try:
                 order_id = await ctx.order_manager.submit_order(
                     token_id=market.token_id,
                     side="BUY",
                     price=market.safe_price,
-                    size=market.min_size,
+                    size=size,
                     condition_id=market.condition_id,
                 )
                 ctx.track_order(order_id, cost)
@@ -669,7 +685,9 @@ class TestOrderLifecycleStress:
         for cycle in range(cycles):
             pre_balance = ctx.order_manager.get_available_balance()
 
-            cost = market.safe_price * market.min_size
+            # Ensure size meets minimum order cost ($1)
+            size = max(market.min_size, _min_size_for_cost(market.safe_price))
+            cost = market.safe_price * size
 
             if not ctx.can_submit_more():
                 logger.info("Exposure limit reached")
@@ -681,7 +699,7 @@ class TestOrderLifecycleStress:
                     token_id=market.token_id,
                     side="BUY",
                     price=market.safe_price,
-                    size=market.min_size,
+                    size=size,
                     condition_id=market.condition_id,
                 )
                 ctx.track_order(order_id, cost)
@@ -752,7 +770,9 @@ class TestAPIResilience:
             pass  # Expected failure
 
         # Now verify normal operations still work
-        cost = market.safe_price * market.min_size
+        # Ensure size meets minimum order cost ($1)
+        size = max(market.min_size, _min_size_for_cost(market.safe_price))
+        cost = market.safe_price * size
 
         if not ctx.can_submit_more():
             pytest.skip("Exposure limit reached")
@@ -761,7 +781,7 @@ class TestAPIResilience:
             token_id=market.token_id,
             side="BUY",
             price=market.safe_price,
-            size=market.min_size,
+            size=size,
             condition_id=market.condition_id,
         )
         ctx.track_order(order_id, cost)
@@ -809,13 +829,15 @@ class TestLatencyMeasurement:
 
         # Measure order submit
         if ctx.can_submit_more():
-            cost = market.safe_price * market.min_size
+            # Ensure size meets minimum order cost ($1)
+            size = max(market.min_size, _min_size_for_cost(market.safe_price))
+            cost = market.safe_price * size
             start = time.time()
             order_id = await ctx.order_manager.submit_order(
                 token_id=market.token_id,
                 side="BUY",
                 price=market.safe_price,
-                size=market.min_size,
+                size=size,
                 condition_id=market.condition_id,
             )
             latencies["order_submit"].append((time.time() - start) * 1000)

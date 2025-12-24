@@ -146,7 +146,9 @@ class TestExitBoundaries:
     ])
     def test_hold_days_boundary(self, exit_manager, sample_position, days_held, expected_strategy):
         """Should apply correct strategy based on hold duration."""
-        sample_position.entry_time = datetime.now(timezone.utc) - timedelta(days=days_held)
+        hold_time = datetime.now(timezone.utc) - timedelta(days=days_held)
+        sample_position.entry_time = hold_time
+        sample_position.hold_start_at = hold_time  # Must update both for consistent hold duration
 
         strategy = exit_manager.get_strategy_for_position(sample_position)
 

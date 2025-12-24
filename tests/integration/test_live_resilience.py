@@ -32,7 +32,7 @@ import os
 import time
 import uuid
 from dataclasses import dataclass, field
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from pathlib import Path
 from typing import Any, Optional, List
 
@@ -63,7 +63,9 @@ LIVE_RESILIENCE_ENV_VAR = "LIVE_RESILIENCE_TEST_ENABLED"
 CREDS_ENV_VAR = "POLYMARKET_CREDS_PATH"
 DEFAULT_CREDS_PATH = "polymarket_api_creds.json"
 
-MAX_ORDER_COST = Decimal("0.25")
+# Order constraints - Polymarket requires minimum $1 order value
+MIN_ORDER_COST = Decimal("1.00")  # CLOB minimum
+MAX_ORDER_COST = Decimal("2.00")  # Test limit
 MIN_PRICE = Decimal("0.01")
 MAX_PRICE = Decimal("0.99")
 TIMEOUT_SECONDS = 30
@@ -121,6 +123,14 @@ def _quantize(value: Decimal, step: Decimal, rounding) -> Decimal:
     if step <= 0:
         return value
     return (value / step).to_integral_value(rounding=rounding) * step
+
+
+def _min_size_for_cost(price: Decimal, min_cost: Decimal = MIN_ORDER_COST) -> Decimal:
+    """Compute minimum size to meet minimum order cost requirement."""
+    if price <= 0:
+        return Decimal("100")  # Fallback for safety
+    raw = min_cost / price
+    return _quantize(raw, Decimal("0.01"), ROUND_UP)
 
 
 async def _with_timeout(coro, description: str, timeout: float = TIMEOUT_SECONDS):
@@ -192,7 +202,7 @@ class ResilienceTestContext:
 # Fixtures
 # =============================================================================
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def live_creds() -> dict[str, Any]:
     creds_path = Path(os.environ.get(CREDS_ENV_VAR, DEFAULT_CREDS_PATH))
     creds = _load_creds(creds_path)
@@ -200,7 +210,7 @@ def live_creds() -> dict[str, Any]:
     return creds
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def clob_client(live_creds):
     try:
         from py_clob_client.client import ClobClient
@@ -222,13 +232,13 @@ def clob_client(live_creds):
     )
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 async def rest_client():
     async with PolymarketRestClient(timeout=TIMEOUT_SECONDS) as client:
         yield client
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 async def test_market(rest_client) -> ResilienceTestMarket:
     """Find a market for resilience testing."""
     markets = []
@@ -275,7 +285,7 @@ async def test_market(rest_client) -> ResilienceTestMarket:
                 token_id=token.token_id,
                 condition_id=market.condition_id,
                 safe_price=safe_price,
-                min_size=_to_decimal(metadata.get("minOrderSize")) or Decimal("1"),
+                min_size=max(_to_decimal(metadata.get("minOrderSize")) or Decimal("5"), Decimal("5")),
                 tick_size=_to_decimal(metadata.get("tickSize")) or Decimal("0.01"),
             )
 
@@ -353,7 +363,9 @@ class TestIdempotentSubmission:
         order_ids = set()
 
         for i in range(3):
-            cost = test_market.safe_price * test_market.min_size
+            # Ensure size meets minimum order cost ($1)
+            size = max(test_market.min_size, _min_size_for_cost(test_market.safe_price))
+            cost = test_market.safe_price * size
             if cost > MAX_ORDER_COST:
                 pytest.skip("Order cost too high")
 
@@ -362,7 +374,7 @@ class TestIdempotentSubmission:
                     token_id=test_market.token_id,
                     side="BUY",
                     price=test_market.safe_price,
-                    size=test_market.min_size,
+                    size=size,
                     condition_id=test_market.condition_id,
                 ),
                 f"submitting order {i}",
@@ -389,7 +401,9 @@ class TestIdempotentSubmission:
         """
         ctx = resilience_context
 
-        cost = test_market.safe_price * test_market.min_size
+        # Ensure size meets minimum order cost ($1)
+        size = max(test_market.min_size, _min_size_for_cost(test_market.safe_price))
+        cost = test_market.safe_price * size
         if cost > MAX_ORDER_COST:
             pytest.skip("Order cost too high")
 
@@ -398,7 +412,7 @@ class TestIdempotentSubmission:
             token_id=test_market.token_id,
             side="BUY",
             price=test_market.safe_price,
-            size=test_market.min_size,
+            size=size,
             condition_id=test_market.condition_id,
         )
         ctx.track_order(order_id_1)
@@ -410,7 +424,7 @@ class TestIdempotentSubmission:
             token_id=test_market.token_id,
             side="BUY",
             price=test_market.safe_price,
-            size=test_market.min_size,
+            size=size,
             condition_id=test_market.condition_id,
         )
         ctx.track_order(order_id_2)
@@ -453,7 +467,9 @@ class TestRestartRecovery:
         ctx = resilience_context
 
         # Submit an order
-        cost = test_market.safe_price * test_market.min_size
+        # Ensure size meets minimum order cost ($1)
+        size = max(test_market.min_size, _min_size_for_cost(test_market.safe_price))
+        cost = test_market.safe_price * size
         if cost > MAX_ORDER_COST:
             pytest.skip("Order cost too high")
 
@@ -461,7 +477,7 @@ class TestRestartRecovery:
             token_id=test_market.token_id,
             side="BUY",
             price=test_market.safe_price,
-            size=test_market.min_size,
+            size=size,
             condition_id=test_market.condition_id,
         )
         ctx.track_order(order_id)
@@ -489,7 +505,9 @@ class TestRestartRecovery:
         """
         ctx = resilience_context
 
-        cost = test_market.safe_price * test_market.min_size
+        # Ensure size meets minimum order cost ($1)
+        size = max(test_market.min_size, _min_size_for_cost(test_market.safe_price))
+        cost = test_market.safe_price * size
         if cost > MAX_ORDER_COST:
             pytest.skip("Order cost too high")
 
@@ -500,7 +518,7 @@ class TestRestartRecovery:
             token_id=test_market.token_id,
             side="BUY",
             price=test_market.safe_price,
-            size=test_market.min_size,
+            size=size,
             condition_id=test_market.condition_id,
         )
         ctx.track_order(order_id)
@@ -533,7 +551,9 @@ class TestRestartRecovery:
         """
         ctx = resilience_context
 
-        cost = test_market.safe_price * test_market.min_size
+        # Ensure size meets minimum order cost ($1)
+        size = max(test_market.min_size, _min_size_for_cost(test_market.safe_price))
+        cost = test_market.safe_price * size
         if cost > MAX_ORDER_COST:
             pytest.skip("Order cost too high")
 
@@ -542,7 +562,7 @@ class TestRestartRecovery:
             token_id=test_market.token_id,
             side="BUY",
             price=test_market.safe_price,
-            size=test_market.min_size,
+            size=size,
             condition_id=test_market.condition_id,
         )
         ctx.track_order(order_id)
@@ -675,7 +695,9 @@ class TestCancelRaceConditions:
         """
         ctx = resilience_context
 
-        cost = test_market.safe_price * test_market.min_size
+        # Ensure size meets minimum order cost ($1)
+        size = max(test_market.min_size, _min_size_for_cost(test_market.safe_price))
+        cost = test_market.safe_price * size
         if cost > MAX_ORDER_COST:
             pytest.skip("Order cost too high")
 
@@ -684,7 +706,7 @@ class TestCancelRaceConditions:
             token_id=test_market.token_id,
             side="BUY",
             price=test_market.safe_price,
-            size=test_market.min_size,
+            size=size,
             condition_id=test_market.condition_id,
         )
         ctx.track_order(order_id)
@@ -748,7 +770,9 @@ class TestCancelRaceConditions:
         """
         ctx = resilience_context
 
-        cost = test_market.safe_price * test_market.min_size
+        # Ensure size meets minimum order cost ($1)
+        size = max(test_market.min_size, _min_size_for_cost(test_market.safe_price))
+        cost = test_market.safe_price * size
         if cost > MAX_ORDER_COST:
             pytest.skip("Order cost too high")
 
@@ -759,7 +783,7 @@ class TestCancelRaceConditions:
             token_id=test_market.token_id,
             side="BUY",
             price=test_market.safe_price,
-            size=test_market.min_size,
+            size=size,
             condition_id=test_market.condition_id,
         )
         ctx.track_order(order_id)
@@ -772,7 +796,7 @@ class TestCancelRaceConditions:
 
         logger.info(
             f"Order {order_id}: status={order.status}, "
-            f"filled={filled_before_cancel}/{test_market.min_size}"
+            f"filled={filled_before_cancel}/{size}"
         )
 
         # Cancel
@@ -923,7 +947,9 @@ class TestStateConsistency:
         """
         ctx = resilience_context
 
-        cost = test_market.safe_price * test_market.min_size
+        # Ensure size meets minimum order cost ($1)
+        size = max(test_market.min_size, _min_size_for_cost(test_market.safe_price))
+        cost = test_market.safe_price * size
         if cost > MAX_ORDER_COST:
             pytest.skip("Order cost too high")
 
@@ -932,7 +958,7 @@ class TestStateConsistency:
             token_id=test_market.token_id,
             side="BUY",
             price=test_market.safe_price,
-            size=test_market.min_size,
+            size=size,
             condition_id=test_market.condition_id,
         )
         ctx.track_order(order_id)

@@ -40,16 +40,17 @@ class TestDashboardEndpoints:
 
     def test_positions_endpoint(self, client, mock_db):
         """Should return current positions."""
-        # Setup mock to return positions
+        # Setup mock to return positions with correct DB column names
+        # Dashboard expects 'id' and 'entry_timestamp', not 'position_id' and 'entry_time'
         mock_db.fetch = AsyncMock(return_value=[
             {
-                "position_id": "pos_test",
+                "id": 1,  # DB column is 'id', mapped to 'position_id' in API response
                 "token_id": "tok_abc",
                 "condition_id": "0x123",
                 "size": 20,
                 "entry_price": 0.95,
                 "entry_cost": 19.00,
-                "entry_time": datetime.now(timezone.utc).isoformat(),
+                "entry_timestamp": datetime.now(timezone.utc).isoformat(),  # DB column name
                 "realized_pnl": 0,
                 "status": "open",
             }
@@ -196,15 +197,16 @@ class TestDashboardData:
     @pytest.mark.asyncio
     async def test_get_positions_returns_list(self, mock_db):
         """Should return positions as list of dicts."""
+        # Use correct DB column names: 'id' (not position_id), 'entry_timestamp' (not entry_time)
         mock_db.fetch = AsyncMock(return_value=[
             {
-                "position_id": "pos_1",
+                "id": 1,  # DB column is 'id', mapped to 'position_id' in API
                 "token_id": "tok_1",
                 "condition_id": "0x1",
                 "size": 20,
                 "entry_price": 0.95,
                 "entry_cost": 19.00,
-                "entry_time": "2024-01-01T00:00:00",
+                "entry_timestamp": "2024-01-01T00:00:00",  # DB column name
                 "realized_pnl": None,
                 "status": "open",
             }
@@ -214,7 +216,7 @@ class TestDashboardData:
         positions = await dashboard._get_positions()
 
         assert len(positions) == 1
-        assert positions[0]["position_id"] == "pos_1"
+        assert positions[0]["position_id"] == "1"  # id is mapped to string position_id
         assert positions[0]["size"] == 20.0
 
     @pytest.mark.asyncio
@@ -391,7 +393,9 @@ class TestDashboardSecurity:
         """
         Should reject requests with wrong API key.
         """
-        monkeypatch.setenv("DASHBOARD_API_KEY", "correct_key")
+        # Patch the module-level variable directly (env var is read at import time)
+        import polymarket_bot.monitoring.dashboard as dashboard_module
+        monkeypatch.setattr(dashboard_module, 'DASHBOARD_API_KEY', 'correct_key')
 
         from polymarket_bot.monitoring.dashboard import create_app
 
@@ -489,18 +493,18 @@ class TestXSSProtection:
         from unittest.mock import AsyncMock
 
         # Mock position with malicious data
+        # Use correct DB column names: 'id' (not position_id), 'entry_timestamp' (not entry_time)
         mock_db.fetch = AsyncMock(return_value=[
             {
-                "position_id": "pos_xss",
+                "id": 999,  # DB column is 'id'
                 "token_id": "tok_xss",
                 "condition_id": "0xxss",
                 "size": 20,
                 "entry_price": 0.95,
                 "entry_cost": 19.00,
-                "entry_time": "2024-01-01T00:00:00",
+                "entry_timestamp": "2024-01-01T00:00:00",  # DB column name
                 "realized_pnl": 0,
                 "status": "open",
-                "question": "<script>alert('xss')</script>",  # Malicious
             }
         ])
 

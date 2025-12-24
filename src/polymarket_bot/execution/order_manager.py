@@ -5,6 +5,8 @@ Handles order submission to Polymarket CLOB and status tracking.
 """
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -31,6 +33,10 @@ class PriceTooHighError(PreSubmitValidationError):
         self.price = price
         self.max_price = max_price
         super().__init__(f"Price {price} exceeds maximum {max_price}")
+
+
+class OrderSubmissionError(Exception):
+    """Raised when CLOB order submission returns an invalid order ID."""
 
 
 class OrderStatus(Enum):
@@ -168,6 +174,22 @@ class OrderManager:
             # Submit to CLOB
             order_id = await self._submit_to_clob(token_id, side, price, size)
 
+            # CRITICAL FIX: Reject empty order IDs
+            if not order_id or not str(order_id).strip():
+                if side == "BUY":
+                    self._balance_manager.release_reservation(temp_order_id)
+                logger.error(
+                    "CLOB returned empty order ID for %s order: %s @ %s (token=%s)",
+                    side,
+                    size,
+                    price,
+                    token_id,
+                )
+                raise OrderSubmissionError(
+                    "CLOB returned empty order ID - submission may have failed"
+                )
+            order_id = str(order_id).strip()
+
             # Create order record
             now = datetime.now(timezone.utc)
             order = Order(
@@ -193,6 +215,9 @@ class OrderManager:
 
             logger.info(f"Submitted {side} order {order_id}: {size} @ {price}")
             return order_id
+
+        except OrderSubmissionError:
+            raise
 
         except InsufficientBalanceError:
             if side == "BUY":
@@ -222,7 +247,11 @@ class OrderManager:
             return self._orders.get(order_id)
 
         try:
-            result = self._clob_client.get_order(order_id)
+            get_order = self._clob_client.get_order
+            if inspect.iscoroutinefunction(get_order):
+                result = await get_order(order_id)
+            else:
+                result = await asyncio.to_thread(get_order, order_id)
 
             if order_id not in self._orders:
                 # Create from CLOB data
@@ -312,7 +341,7 @@ class OrderManager:
             return False
 
         try:
-            self._clob_client.cancel_order(order_id)
+            self._clob_client.cancel(order_id)
 
             if order_id in self._orders:
                 order = self._orders[order_id]

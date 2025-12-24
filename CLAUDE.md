@@ -533,9 +533,11 @@ See `docs/reference/README.md` for how to use that folder.
 | `MIN_HOLD_DAYS` | `7` | Days before applying exit strategy |
 | `LOG_LEVEL` | `INFO` | Logging level |
 | `DASHBOARD_ENABLED` | `true` | Enable/disable monitoring dashboard |
-| `DASHBOARD_HOST` | `127.0.0.1` | Dashboard bind address (localhost for security) |
-| `DASHBOARD_PORT` | `5050` | Dashboard HTTP port |
+| `DASHBOARD_HOST` | `0.0.0.0` | Dashboard bind address (`0.0.0.0` for Docker/Tailscale - see G11) |
+| `DASHBOARD_PORT` | `9050` | Dashboard port (use a port FREE on your host - see G11) |
 | `DASHBOARD_API_KEY` | (optional) | API key for dashboard authentication |
+
+**Note on Dashboard (G11):** Default port is 9050. Access via Tailscale: `http://<tailscale-ip>:9050`. Works the same inside Docker or running directly on host. See `docs/reference/known_gotchas.md#g11` for details.
 
 ### Setup Instructions
 

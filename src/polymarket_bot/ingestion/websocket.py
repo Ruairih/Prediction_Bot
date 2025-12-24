@@ -124,7 +124,11 @@ class PolymarketWebSocket:
         # Tasks
         self._receive_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
+        self._processor_task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
+
+        # Event buffer to decouple receive from processing
+        self._event_buffer: asyncio.Queue[str | bytes] = asyncio.Queue(maxsize=1000)
 
         # Heartbeat tracking
         self._last_message_time: Optional[float] = None
@@ -182,6 +186,8 @@ class PolymarketWebSocket:
             return
 
         self._stop_event.clear()
+        if not self._processor_task or self._processor_task.done():
+            self._processor_task = asyncio.create_task(self._process_loop())
         await self._connect()
 
     async def stop(self) -> None:
@@ -212,6 +218,13 @@ class PolymarketWebSocket:
             self._heartbeat_task.cancel()
             try:
                 await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+
+        if self._processor_task:
+            self._processor_task.cancel()
+            try:
+                await self._processor_task
             except asyncio.CancelledError:
                 pass
 
@@ -278,7 +291,7 @@ class PolymarketWebSocket:
                         timeout=self._heartbeat_timeout,
                     )
                     self._last_message_time = time.time()
-                    await self._handle_message(message)
+                    self._enqueue_message(message)
 
                 except asyncio.TimeoutError:
                     # No message received within timeout - connection may be stale
@@ -318,6 +331,43 @@ class PolymarketWebSocket:
         # Reconnect if not stopping
         if not self._stop_event.is_set():
             await self._schedule_reconnect()
+
+    def _enqueue_message(self, message: str | bytes) -> None:
+        """Add a message to the processing buffer without blocking."""
+        if self._event_buffer.full():
+            try:
+                self._event_buffer.get_nowait()
+                self._event_buffer.task_done()
+                logger.warning("Event buffer full - dropping oldest message")
+            except asyncio.QueueEmpty:
+                logger.warning("Event buffer full - dropping incoming message")
+                return
+
+        try:
+            self._event_buffer.put_nowait(message)
+        except asyncio.QueueFull:
+            logger.warning("Event buffer still full - dropping incoming message")
+
+    async def _process_loop(self) -> None:
+        """Process buffered WebSocket messages."""
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    message = await asyncio.wait_for(
+                        self._event_buffer.get(),
+                        timeout=1.0,
+                    )
+                except asyncio.TimeoutError:
+                    continue
+
+                try:
+                    await self._handle_message(message)
+                finally:
+                    self._event_buffer.task_done()
+
+        except asyncio.CancelledError:
+            logger.debug("Processor loop cancelled")
+            raise
 
     async def _heartbeat_loop(self) -> None:
         """Monitor connection health and trigger reconnect if stale."""

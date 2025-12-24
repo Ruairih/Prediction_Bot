@@ -58,8 +58,9 @@ LIVE_EDGE_ENV_VAR = "LIVE_EDGE_TEST_ENABLED"
 CREDS_ENV_VAR = "POLYMARKET_CREDS_PATH"
 DEFAULT_CREDS_PATH = "polymarket_api_creds.json"
 
-# Very conservative limits for edge case testing
-MAX_ORDER_COST = Decimal("0.25")
+# Order constraints - Polymarket requires minimum $1 order value
+MIN_ORDER_COST = Decimal("1.00")  # CLOB minimum
+MAX_ORDER_COST = Decimal("2.00")  # Test limit
 MIN_PRICE = Decimal("0.01")
 MAX_PRICE = Decimal("0.99")
 TIMEOUT_SECONDS = 30
@@ -119,6 +120,14 @@ def _quantize(value: Decimal, step: Decimal, rounding) -> Decimal:
     return (value / step).to_integral_value(rounding=rounding) * step
 
 
+def _min_size_for_cost(price: Decimal, min_cost: Decimal = MIN_ORDER_COST) -> Decimal:
+    """Compute minimum size to meet minimum order cost requirement."""
+    if price <= 0:
+        return Decimal("100")  # Fallback for safety
+    raw = min_cost / price
+    return _quantize(raw, Decimal("0.01"), ROUND_UP)
+
+
 async def _with_timeout(coro, description: str, timeout: float = TIMEOUT_SECONDS):
     try:
         return await asyncio.wait_for(coro, timeout=timeout)
@@ -171,7 +180,7 @@ class EdgeTestContext:
 # Fixtures
 # =============================================================================
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def live_creds() -> dict[str, Any]:
     creds_path = Path(os.environ.get(CREDS_ENV_VAR, DEFAULT_CREDS_PATH))
     try:
@@ -182,7 +191,7 @@ def live_creds() -> dict[str, Any]:
     return creds
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def clob_client(live_creds):
     try:
         from py_clob_client.client import ClobClient
@@ -206,13 +215,13 @@ def clob_client(live_creds):
     )
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 async def rest_client():
     async with PolymarketRestClient(timeout=TIMEOUT_SECONDS) as client:
         yield client
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 async def test_market(rest_client) -> EdgeTestMarket:
     """Find a market suitable for edge case testing."""
     markets = []
@@ -264,7 +273,7 @@ async def test_market(rest_client) -> EdgeTestMarket:
                     best_bid=orderbook.best_bid,
                     best_ask=orderbook.best_ask,
                     spread=spread,
-                    min_size=_to_decimal(metadata.get("minOrderSize")) or Decimal("1"),
+                    min_size=max(_to_decimal(metadata.get("minOrderSize")) or Decimal("5"), Decimal("5")),
                     tick_size=_to_decimal(metadata.get("tickSize")) or Decimal("0.01"),
                 )
 
@@ -352,7 +361,8 @@ class TestPartialFillDetection:
         if mid_price <= test_market.best_bid:
             pytest.skip("Spread too tight for partial fill test")
 
-        size = test_market.min_size
+        # Ensure size meets minimum order cost ($1)
+        size = max(test_market.min_size, _min_size_for_cost(mid_price))
         cost = mid_price * size
 
         if cost > MAX_ORDER_COST:
@@ -416,7 +426,8 @@ class TestOrderRejection:
 
         # Very low price - unlikely to fill but should be accepted
         low_price = MIN_PRICE
-        size = test_market.min_size
+        # Ensure size meets minimum order cost ($1)
+        size = max(test_market.min_size, _min_size_for_cost(low_price))
         cost = low_price * size
 
         if cost > MAX_ORDER_COST:
@@ -476,7 +487,8 @@ class TestConcurrentOrders:
         safe_price = max(MIN_PRICE, test_market.best_bid - Decimal("0.15"))
         safe_price = _quantize(safe_price, test_market.tick_size, ROUND_DOWN)
 
-        size = test_market.min_size
+        # Ensure size meets minimum order cost ($1)
+        size = max(test_market.min_size, _min_size_for_cost(safe_price))
         per_order_cost = safe_price * size
         total_cost = per_order_cost * num_orders
 
@@ -608,7 +620,8 @@ class TestStaleOrderCleanup:
         safe_price = max(MIN_PRICE, test_market.best_bid - Decimal("0.10"))
         safe_price = _quantize(safe_price, test_market.tick_size, ROUND_DOWN)
 
-        size = test_market.min_size
+        # Ensure size meets minimum order cost ($1)
+        size = max(test_market.min_size, _min_size_for_cost(safe_price))
         cost = safe_price * size
 
         if cost > MAX_ORDER_COST:

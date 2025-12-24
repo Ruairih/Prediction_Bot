@@ -69,6 +69,10 @@ def mock_websocket_stale():
 def mock_clob_client():
     """Mock CLOB client for balance checks."""
     client = MagicMock()
+    # Health checker uses get_balance_allowance with micro-units (6 decimals)
+    # $500.00 = 500000000 micro-units
+    client.get_balance_allowance.return_value = {"balance": "500000000"}
+    # Backwards compatibility for old code
     client.get_balance.return_value = {"USDC": "500.00"}
     return client
 
@@ -77,6 +81,8 @@ def mock_clob_client():
 def mock_clob_low_balance():
     """Mock CLOB client with low balance."""
     client = MagicMock()
+    # $50.00 = 50000000 micro-units
+    client.get_balance_allowance.return_value = {"balance": "50000000"}
     client.get_balance.return_value = {"USDC": "50.00"}
     return client
 

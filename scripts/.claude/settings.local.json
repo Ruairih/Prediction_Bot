@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sudo lsof:*)",
+      "Bash(ss -tlnp:*)",
+      "Bash(docker volume:*)",
+      "Bash(docker compose start:*)",
+      "Bash(iptables:*)",
+      "Bash(docker exec:*)"
+    ]
+  }
+}

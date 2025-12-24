@@ -15,6 +15,7 @@ Critical Gotchas:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -493,17 +494,37 @@ class TradingEngine:
         try:
             # Use ingestion layer's verify function if available
             if hasattr(self._api_client, "verify_orderbook_price"):
-                is_valid, actual_price, reason = await self._api_client.verify_orderbook_price(
-                    token_id,
-                    expected_price,
-                    self.config.max_price_deviation,
-                )
+                verify = self._api_client.verify_orderbook_price
+                if inspect.iscoroutinefunction(verify):
+                    is_valid, actual_price, reason = await verify(
+                        token_id,
+                        expected_price,
+                        self.config.max_price_deviation,
+                    )
+                else:
+                    is_valid, actual_price, reason = await asyncio.to_thread(
+                        verify,
+                        token_id,
+                        expected_price,
+                        self.config.max_price_deviation,
+                    )
                 if not is_valid:
                     logger.warning(f"G5: {reason}")
                 return is_valid
 
             # Fallback: fetch orderbook directly
-            orderbook = await self._api_client.get_orderbook(token_id)
+            get_orderbook = getattr(self._api_client, "get_orderbook", None)
+            if get_orderbook is None:
+                get_orderbook = getattr(self._api_client, "get_order_book", None)
+            if get_orderbook is None:
+                logger.error("G5: API client missing get_orderbook/get_order_book")
+                return False
+
+            if inspect.iscoroutinefunction(get_orderbook):
+                orderbook = await get_orderbook(token_id)
+            else:
+                # CRITICAL FIX: Wrap sync call in thread to avoid blocking event loop
+                orderbook = await asyncio.to_thread(get_orderbook, token_id)
             if not orderbook:
                 return False
 

@@ -193,6 +193,17 @@ class ExecutionService:
         # Load open orders and restore reservations
         orders_loaded = await self._order_manager.load_orders()
 
+        # CRITICAL FIX: Reconcile with CLOB immediately
+        if self._clob_client:
+            open_orders = self._order_manager.get_open_orders()
+            if open_orders:
+                logger.info(f"Reconciling {len(open_orders)} open orders with CLOB")
+            for order in open_orders:
+                try:
+                    await self._order_manager.sync_order_status(order.order_id)
+                except Exception as e:
+                    logger.warning(f"Could not sync order {order.order_id}: {e}")
+
         # Load open positions
         await self._position_tracker.load_positions()
 
