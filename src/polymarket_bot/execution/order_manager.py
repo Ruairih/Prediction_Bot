@@ -280,7 +280,8 @@ class OrderManager:
                 order.status = OrderStatus.PARTIAL
             elif clob_status == "LIVE":
                 order.status = OrderStatus.LIVE
-            elif clob_status == "CANCELLED":
+            elif clob_status in ("CANCELLED", "CANCELED"):
+                # Note: CLOB uses American spelling "CANCELED"
                 order.status = OrderStatus.CANCELLED
             elif clob_status in ("FAILED", "REJECTED", "EXPIRED"):
                 # FIX: Handle these statuses that were previously unmapped

@@ -143,10 +143,15 @@ class HighProbYesStrategy:
             )
 
         # Apply size filter if required
+        # G3: WebSocket doesn't include trade size - skip check when unavailable
         if self._require_size_filter:
-            if not passes_size_filter(context.trade_size):
+            if context.trade_size is None:
+                # Size unavailable (G3 WebSocket limitation) - proceed without size filter
+                # This is expected behavior, not a rejection
+                pass
+            elif not passes_size_filter(context.trade_size):
                 return IgnoreSignal(
-                    reason=f"Trade size {context.trade_size} below minimum",
+                    reason=f"Trade size {context.trade_size} below minimum 50",
                     filter_name="trade_size",
                 )
 
@@ -156,11 +161,15 @@ class HighProbYesStrategy:
 
         # High score → Entry
         if context.model_score >= self._entry_score_threshold:
+            # Cap entry price at threshold to avoid overpaying
+            # WebSocket may report current orderbook price (e.g., 0.98) even when
+            # the trigger was at threshold (0.95). We place a limit order at threshold.
+            entry_price = min(context.trigger_price, self._price_threshold)
             return EntrySignal(
                 reason=f"High probability entry (score={context.model_score:.2f})",
                 token_id=context.token_id,
                 side="BUY",
-                price=context.trigger_price,
+                price=entry_price,
                 size=self._position_size,
             )
 

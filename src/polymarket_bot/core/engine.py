@@ -41,6 +41,7 @@ from polymarket_bot.strategies import (
 from .event_processor import EventProcessor
 from .trigger_tracker import TriggerTracker
 from .watchlist_service import WatchlistService
+from .pipeline_tracker import PipelineTracker, RejectionStage
 
 logger = logging.getLogger(__name__)
 
@@ -136,11 +137,23 @@ class TradingEngine:
         )
         self._trigger_tracker = TriggerTracker(db)
         self._watchlist_service = WatchlistService(db)
+        self._pipeline_tracker = PipelineTracker(
+            sample_rate=10,  # Sample 1:10 for better visibility (was 1:50)
+            max_recent_rejections=2000,  # Keep more samples (was 1000)
+        )
+
+        # LRU cache for market questions (condition_id -> question)
+        self._question_cache: dict[str, str] = {}
+        self._question_cache_max_size = 10000
 
         # State
         self._is_running = False
         self._stop_event = asyncio.Event()
         self._stats = EngineStats()
+        self._paused = False
+        self._paused_reason: Optional[str] = None
+        self._paused_at: Optional[datetime] = None
+        self._blocked_conditions: dict[str, str] = {}
 
         # Order management (used when no execution_service provided)
         self._pending_orders: list[dict] = []
@@ -151,6 +164,16 @@ class TradingEngine:
         return self._is_running
 
     @property
+    def is_paused(self) -> bool:
+        """Whether the engine is paused."""
+        return self._paused
+
+    @property
+    def paused_reason(self) -> Optional[str]:
+        """Optional pause reason."""
+        return self._paused_reason
+
+    @property
     def stats(self) -> EngineStats:
         """Current engine statistics."""
         return self._stats
@@ -159,6 +182,11 @@ class TradingEngine:
     def trigger_repo(self) -> TriggerTracker:
         """Access to trigger tracker."""
         return self._trigger_tracker
+
+    @property
+    def pipeline_tracker(self) -> PipelineTracker:
+        """Access to pipeline tracker for visibility."""
+        return self._pipeline_tracker
 
     @property
     def position_repo(self):
@@ -198,6 +226,59 @@ class TradingEngine:
 
         logger.info("Trading engine started")
 
+    def pause(self, reason: str = "manual") -> None:
+        """Pause trading without stopping the engine."""
+        if not self._paused:
+            self._paused = True
+            self._paused_reason = reason
+            self._paused_at = datetime.now(timezone.utc)
+            logger.warning(f"Trading engine paused: {reason}")
+
+    def resume(self) -> None:
+        """Resume trading after a pause."""
+        if self._paused:
+            self._paused = False
+            self._paused_reason = None
+            self._paused_at = None
+            logger.info("Trading engine resumed")
+
+    def update_config(
+        self,
+        *,
+        price_threshold: Optional[Decimal] = None,
+        position_size: Optional[Decimal] = None,
+        max_positions: Optional[int] = None,
+        max_trade_age_seconds: Optional[int] = None,
+        max_price_deviation: Optional[Decimal] = None,
+    ) -> None:
+        """Update runtime engine configuration."""
+        if price_threshold is not None:
+            self.config.price_threshold = price_threshold
+            self._event_processor.set_threshold(price_threshold)
+        if position_size is not None:
+            self.config.position_size = position_size
+        if max_positions is not None:
+            self.config.max_positions = max_positions
+        if max_trade_age_seconds is not None:
+            self.config.max_trade_age_seconds = max_trade_age_seconds
+            self._event_processor.set_max_trade_age_seconds(max_trade_age_seconds)
+        if max_price_deviation is not None:
+            self.config.max_price_deviation = max_price_deviation
+
+    def block_market(self, condition_id: str, reason: str = "manual_block") -> None:
+        """Block a market condition ID from trading."""
+        if condition_id:
+            self._blocked_conditions[condition_id] = reason
+
+    def unblock_market(self, condition_id: str) -> None:
+        """Remove a market from the blocklist."""
+        if condition_id in self._blocked_conditions:
+            self._blocked_conditions.pop(condition_id, None)
+
+    def set_blocklist(self, blocks: dict[str, str]) -> None:
+        """Replace the blocklist with a new mapping."""
+        self._blocked_conditions = dict(blocks)
+
     async def stop(self) -> None:
         """Stop the trading engine."""
         if not self._is_running:
@@ -231,6 +312,12 @@ class TradingEngine:
         """
         self._stats.events_processed += 1
 
+        if not self._is_running:
+            return None
+
+        if self._paused:
+            return None
+
         # 1. Filter event type
         if not self._event_processor.should_process(event):
             return None
@@ -240,9 +327,38 @@ class TradingEngine:
         if trigger_data is None:
             return None
 
+        # 2b. Fetch market question for rejection tracking
+        # Use cache to minimize DB queries - fetches for ALL events now
+        question = await self._fetch_market_question(trigger_data.condition_id)
+
         # 3. Check price threshold
         if not self._event_processor.meets_threshold(trigger_data.price):
+            # Track rejection (sampled - high frequency)
+            self._pipeline_tracker.record_rejection(
+                token_id=trigger_data.token_id,
+                condition_id=trigger_data.condition_id,
+                stage=RejectionStage.THRESHOLD,
+                price=trigger_data.price,
+                question=question,
+                rejection_values={"threshold": float(self.config.price_threshold)},
+            )
             return None
+
+        # 3b. Manual blocklist
+        if trigger_data.condition_id in self._blocked_conditions:
+            self._pipeline_tracker.record_rejection(
+                token_id=trigger_data.token_id,
+                condition_id=trigger_data.condition_id,
+                stage=RejectionStage.MANUAL_BLOCK,
+                price=trigger_data.price,
+                question=question,
+                rejection_values={"block_reason": self._blocked_conditions[trigger_data.condition_id]},
+            )
+            self._stats.filters_rejected += 1
+            return IgnoreSignal(
+                reason=self._blocked_conditions[trigger_data.condition_id],
+                filter_name="manual_block",
+            )
 
         self._stats.triggers_evaluated += 1
 
@@ -254,6 +370,13 @@ class TradingEngine:
         )
 
         if not should_trigger:
+            self._pipeline_tracker.record_rejection(
+                token_id=trigger_data.token_id,
+                condition_id=trigger_data.condition_id,
+                stage=RejectionStage.DUPLICATE,
+                price=trigger_data.price,
+                question=question,
+            )
             logger.debug(
                 f"Duplicate trigger ignored: {trigger_data.token_id} "
                 f"@ {trigger_data.price}"
@@ -270,6 +393,18 @@ class TradingEngine:
         # 6. Apply hard filters
         should_reject, reason = self._event_processor.apply_filters(context)
         if should_reject:
+            # Map filter reason to rejection stage
+            stage = self._map_filter_reason_to_stage(reason)
+            self._pipeline_tracker.record_rejection(
+                token_id=context.token_id,
+                condition_id=context.condition_id,
+                stage=stage,
+                price=context.trigger_price,
+                question=context.question,
+                trade_size=context.trade_size,
+                trade_age_seconds=context.trade_age_seconds,
+                rejection_values={"reason": reason},
+            )
             self._stats.filters_rejected += 1
             logger.debug(f"Hard filter rejected: {reason}")
             return IgnoreSignal(reason=reason, filter_name=reason.split(":")[0])
@@ -303,12 +438,60 @@ class TradingEngine:
             await self._handle_exit(signal, context)
 
         elif signal.type == SignalType.WATCHLIST:
+            # Track as candidate before adding to watchlist
+            self._pipeline_tracker.update_candidate(
+                token_id=context.token_id,
+                condition_id=context.condition_id,
+                question=context.question,
+                price=context.trigger_price,
+                threshold=self.config.price_threshold,
+                signal="WATCHLIST",
+                signal_reason=signal.reason,
+                model_score=context.model_score,
+                time_to_end_hours=context.time_to_end_hours,
+                trade_size=context.trade_size,
+                trade_age_seconds=context.trade_age_seconds,
+            )
             await self._handle_watchlist(signal, context)
 
         elif signal.type == SignalType.IGNORE:
+            # Track strategy IGNORE as rejection
+            self._pipeline_tracker.record_rejection(
+                token_id=context.token_id,
+                condition_id=context.condition_id,
+                stage=RejectionStage.STRATEGY_IGNORE,
+                price=context.trigger_price,
+                question=context.question,
+                rejection_values={"reason": signal.reason},
+            )
             self._stats.filters_rejected += 1
 
-        # HOLD signals need no action
+        elif signal.type == SignalType.HOLD:
+            # Record as rejection AND track as candidate
+            self._pipeline_tracker.record_rejection(
+                token_id=context.token_id,
+                condition_id=context.condition_id,
+                stage=RejectionStage.STRATEGY_HOLD,
+                price=context.trigger_price,
+                question=context.question,
+                rejection_values={"reason": signal.reason},
+            )
+            # Also track as candidate (close to trading)
+            self._pipeline_tracker.update_candidate(
+                token_id=context.token_id,
+                condition_id=context.condition_id,
+                question=context.question,
+                price=context.trigger_price,
+                threshold=self.config.price_threshold,
+                signal="HOLD",
+                signal_reason=signal.reason,
+                model_score=context.model_score,
+                time_to_end_hours=context.time_to_end_hours,
+                trade_size=context.trade_size,
+                trade_age_seconds=context.trade_age_seconds,
+            )
+
+        # HOLD signals need no further action
 
     async def _handle_entry(
         self,
@@ -339,6 +522,17 @@ class TradingEngine:
                 self._execution_service.position_tracker.get_open_positions()
             )
             if open_positions >= self.config.max_positions:
+                self._pipeline_tracker.record_rejection(
+                    token_id=context.token_id,
+                    condition_id=context.condition_id,
+                    stage=RejectionStage.MAX_POSITIONS,
+                    price=context.trigger_price,
+                    question=context.question,
+                    rejection_values={
+                        "open_positions": open_positions,
+                        "max_positions": self.config.max_positions,
+                    },
+                )
                 self._stats.filters_rejected += 1
                 logger.warning(
                     f"Max positions reached ({open_positions}/{self.config.max_positions}), "
@@ -353,6 +547,17 @@ class TradingEngine:
                 context.trigger_price,
             )
             if not is_valid:
+                self._pipeline_tracker.record_rejection(
+                    token_id=context.token_id,
+                    condition_id=context.condition_id,
+                    stage=RejectionStage.G5_ORDERBOOK,
+                    price=context.trigger_price,
+                    question=context.question,
+                    rejection_values={
+                        "trigger_price": float(context.trigger_price),
+                        "max_deviation": float(self.config.max_price_deviation),
+                    },
+                )
                 self._stats.orderbook_rejections += 1
                 logger.warning(
                     f"G5: Orderbook mismatch for {context.token_id}, rejecting"
@@ -531,12 +736,19 @@ class TradingEngine:
             # G5: For BUY orders, check best_ask (what we'd pay)
             # For SELL orders, check best_bid (what we'd receive)
             # Since we're always buying at trigger, check best_ask
-            if not orderbook.get("asks"):
+            # Handle both dict and OrderBookSummary object from py-clob-client
+            asks = getattr(orderbook, 'asks', None) or (orderbook.get("asks") if isinstance(orderbook, dict) else None)
+            if not asks:
                 # No asks available - can't verify
                 logger.warning(f"G5: No asks in orderbook for {token_id}")
                 return False
 
-            best_ask = Decimal(str(orderbook["asks"][0]["price"]))
+            # Handle both OrderSummary object and dict format
+            first_ask = asks[0]
+            if hasattr(first_ask, 'price'):
+                best_ask = Decimal(str(first_ask.price))
+            else:
+                best_ask = Decimal(str(first_ask["price"]))
             deviation = abs(best_ask - expected_price)
 
             if deviation > self.config.max_price_deviation:
@@ -705,3 +917,77 @@ class TradingEngine:
         )
 
         await self._handle_entry(signal, context, event={"source": "watchlist"})
+
+    def _map_filter_reason_to_stage(self, reason: str) -> RejectionStage:
+        """
+        Map a filter rejection reason string to a RejectionStage.
+
+        Args:
+            reason: The reason string from apply_filters
+
+        Returns:
+            Appropriate RejectionStage enum value
+        """
+        reason_lower = reason.lower()
+
+        if "g1" in reason_lower or "trade too old" in reason_lower or "stale" in reason_lower:
+            return RejectionStage.G1_TRADE_AGE
+        elif "g5" in reason_lower or "orderbook" in reason_lower:
+            return RejectionStage.G5_ORDERBOOK
+        elif "g6" in reason_lower or "weather" in reason_lower:
+            return RejectionStage.G6_WEATHER
+        elif "time" in reason_lower and "end" in reason_lower:
+            return RejectionStage.TIME_TO_END
+        elif "expir" in reason_lower:
+            return RejectionStage.TIME_TO_END
+        elif "category" in reason_lower:
+            return RejectionStage.CATEGORY
+        elif "size" in reason_lower and "small" in reason_lower:
+            return RejectionStage.TRADE_SIZE
+        elif "size" in reason_lower:
+            return RejectionStage.TRADE_SIZE
+        else:
+            # Default to strategy ignore for unmapped reasons
+            return RejectionStage.STRATEGY_IGNORE
+
+    async def _fetch_market_question(self, condition_id: str) -> str:
+        """
+        Fetch the market question/description from explorer_markets.
+
+        Uses LRU cache to minimize DB queries. Falls back to empty string if not found.
+
+        Args:
+            condition_id: The market condition ID
+
+        Returns:
+            Market question string, or empty if not found
+        """
+        if not condition_id:
+            return ""
+
+        # Check cache first
+        if condition_id in self._question_cache:
+            return self._question_cache[condition_id]
+
+        try:
+            query = """
+                SELECT question FROM explorer_markets
+                WHERE condition_id = $1
+                LIMIT 1
+            """
+            row = await self._db.fetchrow(query, condition_id)
+            question = row["question"] if row and row.get("question") else ""
+
+            # Add to cache (simple LRU: evict oldest if full)
+            if len(self._question_cache) >= self._question_cache_max_size:
+                # Remove oldest entry (first key in dict)
+                oldest_key = next(iter(self._question_cache))
+                del self._question_cache[oldest_key]
+
+            self._question_cache[condition_id] = question
+            return question
+
+        except Exception as e:
+            logger.debug(f"Failed to fetch question for {condition_id}: {e}")
+
+        return ""
