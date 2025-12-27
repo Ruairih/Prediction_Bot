@@ -4,13 +4,15 @@
  */
 import { useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { formatDistanceToNow } from 'date-fns';
 import { PositionsSummary } from '../components/positions/PositionsSummary';
 import { PositionsFilters } from '../components/positions/PositionsFilters';
 import { PositionsTable } from '../components/positions/PositionsTable';
 import { Pagination } from '../components/common/Pagination';
 import { EmptyState } from '../components/common/EmptyState';
-import { usePositions, useMetrics } from '../hooks/useDashboardData';
-import type { Position, PositionSummary, PositionFilterState } from '../types';
+import { usePositions, useMetrics, useOrders } from '../hooks/useDashboardData';
+import { cancelAllOrders, flattenPositions, closePosition } from '../api/dashboard';
+import type { Position, PositionSummary, PositionFilterState, Order } from '../types';
 
 const PAGE_SIZE = 10;
 
@@ -31,9 +33,11 @@ export function Positions() {
   // Fetch real data from API
   const { data: positionsData, isLoading, error } = usePositions();
   const { data: metricsData } = useMetrics();
+  const { data: ordersData, isLoading: ordersLoading } = useOrders(200);
 
   // Use API data with fallbacks
   const positions: Position[] = positionsData ?? [];
+  const orders: Order[] = ordersData ?? [];
 
   // Derive summary from positions data and metrics
   const summary: PositionSummary = useMemo(() => {
@@ -134,35 +138,92 @@ export function Positions() {
     page * PAGE_SIZE
   );
 
-  const handleClose = (position: Position) => {
-    console.log('Close position:', position.positionId);
-    // TODO: Implement close modal
+  const handleClose = async (position: Position) => {
+    if (!window.confirm(`Close position ${position.positionId}?`)) {
+      return;
+    }
+    try {
+      const result = await closePosition(
+        position.positionId,
+        position.currentPrice,
+        'portfolio_close',
+        position.tokenId
+      );
+      if (!result?.success) {
+        window.alert(result?.error ?? 'Close failed.');
+      }
+    } catch (error) {
+      window.alert(`Close failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   };
 
-  const handleAdjust = (position: Position) => {
-    console.log('Adjust position:', position.positionId);
-    // TODO: Implement adjust modal
+  const handleAdjust = async (position: Position) => {
+    const input = window.prompt(`Limit exit price for ${position.question}`, '');
+    if (input === null) {
+      return;
+    }
+    const price = Number(input);
+    if (!Number.isFinite(price) || price <= 0) {
+      window.alert('Enter a valid limit price.');
+      return;
+    }
+    try {
+      const result = await closePosition(position.positionId, price, 'limit_exit', position.tokenId);
+      if (!result?.success) {
+        window.alert(result?.error ?? 'Exit limit failed.');
+      }
+    } catch (error) {
+      window.alert(`Exit limit failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   };
+
+  const recentOrders = useMemo(() => {
+    const sorted = [...orders];
+    sorted.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    return sorted.slice(0, 20);
+  }, [orders]);
 
   return (
-    <div className="p-6 space-y-6">
-      <div className="flex justify-between items-start">
+    <div className="px-6 py-6 space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-text-primary">Positions</h1>
-          <p className="text-text-secondary">Manage your open and closed positions</p>
+          <div className="text-[11px] uppercase tracking-[0.3em] text-text-secondary/70">
+            Portfolio
+          </div>
+          <h1 className="text-3xl font-semibold text-text-primary">Positions & Orders</h1>
+          <p className="text-text-secondary">Manage live exposure and exit controls.</p>
         </div>
 
-        {/* Loading indicator */}
-        {isLoading && (
-          <span className="text-text-secondary text-sm">Loading...</span>
-        )}
+        <div className="flex items-center gap-3 text-sm">
+          <button
+            className="px-4 py-2 rounded-full border border-border bg-bg-secondary shadow-sm hover:border-accent-blue hover:text-accent-blue transition-colors"
+            onClick={() => window.location.reload()}
+          >
+            Sync
+          </button>
+          <button
+            className="px-4 py-2 rounded-full border border-border bg-bg-secondary shadow-sm hover:border-accent-yellow hover:text-accent-yellow transition-colors"
+            onClick={() => cancelAllOrders()}
+          >
+            Cancel All
+          </button>
+          <button
+            className="px-4 py-2 rounded-full border border-border bg-bg-secondary shadow-sm hover:border-accent-red hover:text-accent-red transition-colors"
+            onClick={() => flattenPositions('portfolio')}
+          >
+            Flatten
+          </button>
+          {(isLoading || ordersLoading) && (
+            <span className="text-text-secondary text-xs">Loading...</span>
+          )}
+        </div>
       </div>
 
       {/* Error Banner */}
       {error && (
-        <div className="bg-red-900/20 border border-red-500/50 rounded-lg p-4">
-          <p className="text-red-400">
-            Unable to load positions. Make sure the bot is running on port 5050.
+        <div className="bg-accent-red/10 border border-accent-red/30 rounded-2xl p-4">
+          <p className="text-accent-red">
+            Unable to load positions. Make sure the bot is running on port 9050.
           </p>
         </div>
       )}
@@ -188,6 +249,68 @@ export function Positions() {
             onAdjust={handleAdjust}
           />
 
+          <div className="bg-bg-secondary rounded-2xl border border-border shadow-sm overflow-hidden mt-6">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+              <div className="text-sm text-text-secondary">
+                Order Blotter
+              </div>
+              <div className="text-xs text-text-secondary">
+                {recentOrders.length} recent orders
+              </div>
+            </div>
+            {recentOrders.length === 0 ? (
+              <div className="px-4 py-6 text-sm text-text-secondary">
+                No orders recorded yet.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-bg-tertiary text-text-secondary text-xs uppercase tracking-widest">
+                    <tr>
+                      <th className="px-4 py-3 text-left">Order</th>
+                      <th className="px-4 py-3 text-right">Side</th>
+                      <th className="px-4 py-3 text-right">Price</th>
+                      <th className="px-4 py-3 text-right">Size</th>
+                      <th className="px-4 py-3 text-right">Filled</th>
+                      <th className="px-4 py-3 text-right">Status</th>
+                      <th className="px-4 py-3 text-right">Slippage</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {recentOrders.map((order) => (
+                      <tr key={order.orderId} className="hover:bg-bg-tertiary/60">
+                        <td className="px-4 py-3">
+                          <div className="text-text-primary">{order.question}</div>
+                          <div className="text-xs text-text-secondary">
+                            {formatDistanceToNow(new Date(order.createdAt), { addSuffix: true })}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 text-right text-text-primary">
+                          {order.side}
+                        </td>
+                        <td className="px-4 py-3 text-right text-text-primary">
+                          {order.price.toFixed(3)}
+                        </td>
+                        <td className="px-4 py-3 text-right text-text-primary">
+                          {order.size.toFixed(2)}
+                        </td>
+                        <td className="px-4 py-3 text-right text-text-secondary">
+                          {order.filledSize.toFixed(2)}
+                        </td>
+                        <td className="px-4 py-3 text-right text-text-secondary">
+                          {order.status}
+                        </td>
+                        <td className="px-4 py-3 text-right text-text-secondary">
+                          {order.slippage !== undefined ? `${order.slippage.toFixed(1)} bps` : '--'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
           <Pagination
             page={page}
             pageSize={PAGE_SIZE}
@@ -196,6 +319,50 @@ export function Positions() {
           />
         </>
       )}
+
+      <div className="bg-bg-secondary rounded-2xl border border-border shadow-sm overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+          <h3 className="text-sm font-semibold text-text-primary">Order Blotter</h3>
+          <span className="text-xs text-text-secondary">{orders.length} orders</span>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-bg-tertiary text-text-secondary text-xs uppercase tracking-widest">
+              <tr>
+                <th className="px-4 py-3 text-left">Token</th>
+                <th className="px-4 py-3 text-right">Side</th>
+                <th className="px-4 py-3 text-right">Price</th>
+                <th className="px-4 py-3 text-right">Size</th>
+                <th className="px-4 py-3 text-right">Filled</th>
+                <th className="px-4 py-3 text-right">Status</th>
+                <th className="px-4 py-3 text-right">Submitted</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {orders.slice(0, 20).map((order) => (
+                <tr key={order.orderId} className="hover:bg-bg-tertiary/60">
+                  <td className="px-4 py-3 text-text-primary">{order.tokenId.slice(0, 8)}...</td>
+                  <td className="px-4 py-3 text-right text-text-secondary">{order.side}</td>
+                  <td className="px-4 py-3 text-right text-text-primary">{order.price.toFixed(3)}</td>
+                  <td className="px-4 py-3 text-right text-text-primary">{order.size.toFixed(2)}</td>
+                  <td className="px-4 py-3 text-right text-text-secondary">{order.filledSize.toFixed(2)}</td>
+                  <td className="px-4 py-3 text-right text-text-secondary">{order.status}</td>
+                  <td className="px-4 py-3 text-right text-text-secondary">
+                    {new Date(order.createdAt).toLocaleTimeString()}
+                  </td>
+                </tr>
+              ))}
+              {orders.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="px-4 py-6 text-center text-text-secondary">
+                    No orders yet.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   );
 }

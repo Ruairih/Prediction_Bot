@@ -156,6 +156,155 @@ export interface PerformanceByCategory {
 }
 
 // =============================================================================
+// Markets
+// =============================================================================
+
+export interface MarketSummary {
+  marketId: string;
+  conditionId: string | null;
+  question: string;
+  category: string | null;
+  bestBid: number | null;
+  bestAsk: number | null;
+  midPrice: number | null;
+  spread: number | null;
+  volume: number | null;
+  liquidity: number | null;
+  endDate: string | null;
+  updatedAt: string | null;
+}
+
+export interface MarketToken {
+  tokenId: string;
+  outcome: string | null;
+  outcomeIndex: number | null;
+}
+
+export interface MarketDetailMarket {
+  marketId: string | null;
+  conditionId: string;
+  question: string;
+  category: string | null;
+  bestBid: number | null;
+  bestAsk: number | null;
+  midPrice: number | null;
+  spread: number | null;
+  liquidity: number | null;
+  volume: number | null;
+  endDate: string | null;
+  updatedAt: string | null;
+  modelScore: number | null;
+  timeToEndHours: number | null;
+  filterRejections: number | null;
+}
+
+export interface MarketDetailPosition {
+  positionId: string;
+  tokenId: string;
+  size: number;
+  entryPrice: number;
+  entryCost: number;
+  currentPrice: number | null;
+  currentValue: number | null;
+  unrealizedPnl: number | null;
+  realizedPnl: number;
+  entryTime: string | null;
+  status: string | null;
+  side: OrderSide | null;
+  outcome: string | null;
+  pnlPercent: number | null;
+}
+
+export interface MarketOpenOrder {
+  orderId: string;
+  tokenId: string;
+  side: OrderSide | null;
+  price: number;
+  size: number;
+  status: string | null;
+  submittedAt: string | null;
+}
+
+export interface MarketSignal {
+  tokenId: string | null;
+  status: string;
+  decision: SignalDecision;
+  price: number;
+  threshold: number;
+  modelScore: number | null;
+  createdAt: string | null;
+}
+
+export interface MarketFill {
+  orderId: string;
+  tokenId: string;
+  side: OrderSide | null;
+  price: number;
+  size: number;
+  filledSize: number;
+  avgFillPrice: number | null;
+  slippageBps: number | null;
+  status: string | null;
+  filledAt: string | null;
+}
+
+export interface MarketTrade {
+  tradeId: string;
+  price: number;
+  size: number;
+  side: string | null;
+  timestamp: string | null;
+}
+
+export interface MarketDetailResponse {
+  market: MarketDetailMarket;
+  position: MarketDetailPosition | null;
+  orders: MarketOpenOrder[];
+  tokens: MarketToken[];
+  lastSignal: MarketSignal | null;
+  lastFill: MarketFill | null;
+  lastTrade: MarketTrade | null;
+}
+
+export interface OrderbookLevel {
+  price: number;
+  size: number;
+}
+
+export interface OrderbookDepth {
+  pct1: number;
+  pct5: number;
+  pct10: number;
+}
+
+export interface OrderbookSlippage {
+  size: number;
+  avgPrice: number | null;
+  slippageBps: number | null;
+}
+
+export interface MarketOrderbook {
+  conditionId: string;
+  tokenId: string | null;
+  snapshotAt: string | null;
+  bestBid: number | null;
+  bestAsk: number | null;
+  midPrice: number | null;
+  spread: number | null;
+  bids: OrderbookLevel[];
+  asks: OrderbookLevel[];
+  depth: {
+    bid: OrderbookDepth;
+    ask: OrderbookDepth;
+  };
+  slippage: {
+    buy: OrderbookSlippage[];
+    sell: OrderbookSlippage[];
+  };
+  source: string;
+}
+
+// =============================================================================
 // Risk & Limits
 // =============================================================================
 
@@ -168,6 +317,8 @@ export interface RiskLimits {
   stopLoss: number;
   profitTarget: number;
   minHoldDays: number;
+  maxPriceDeviation?: number;
+  maxTradeAgeSeconds?: number;
 }
 
 export interface RiskStatus {
@@ -265,6 +416,17 @@ export interface PerformanceStats {
   avgLoss: number;
   bestTrade: number;
   worstTrade: number;
+}
+
+export interface PerformanceResponse {
+  stats: PerformanceStats;
+  equity: EquityPoint[];
+  trades: Trade[];
+  pnl: {
+    daily: PnlBucket[];
+    weekly: PnlBucket[];
+    monthly: PnlBucket[];
+  };
 }
 
 export interface PnlBucket {
@@ -439,6 +601,7 @@ export interface SystemConfig {
   apiBaseUrl: string;
   wsBaseUrl: string;
   features: Record<string, boolean>;
+  uptime?: number;
 }
 
 export interface SystemHealth {
@@ -467,4 +630,75 @@ export interface PaginatedResponse<T> {
   page: number;
   pageSize: number;
   hasMore: boolean;
+}
+
+// =============================================================================
+// Pipeline Visibility
+// =============================================================================
+
+export type RejectionStage =
+  | 'threshold'
+  | 'duplicate'
+  | 'g1_trade_age'
+  | 'g5_orderbook'
+  | 'g6_weather'
+  | 'time_to_end'
+  | 'trade_size'
+  | 'category'
+  | 'manual_block'
+  | 'max_positions'
+  | 'strategy_hold'
+  | 'strategy_ignore';
+
+export interface RejectionEvent {
+  tokenId: string;
+  conditionId: string;
+  stage: RejectionStage;
+  timestamp: string;
+  price: number;
+  question: string;
+  tradeSize: number | null;
+  tradeAgeSeconds: number | null;
+  rejectionValues: Record<string, unknown>;
+}
+
+export interface CandidateMarket {
+  tokenId: string;
+  conditionId: string;
+  question: string;
+  currentPrice: number;
+  threshold: number;
+  distanceToThreshold: number;
+  lastUpdated: string;
+  lastSignal: string;
+  lastSignalReason: string;
+  modelScore: number | null;
+  timeToEndHours: number;
+  tradeSize: number | null;
+  tradeAgeSeconds: number;
+  highestPriceSeen: number;
+  timesEvaluated: number;
+}
+
+export interface PipelineStats {
+  totals: Record<RejectionStage, number>;
+  total: number;
+  since?: string;
+  minutes?: number;
+}
+
+export interface FunnelItem {
+  stage: RejectionStage;
+  label: string;
+  count: number;
+  percentage: number;
+}
+
+export interface PipelineFunnel {
+  funnel: FunnelItem[];
+  totalRejections: number;
+  minutes: number;
+  samples: Record<RejectionStage, RejectionEvent[]>;
+  nearMissCount: number;
+  candidateCount: number;
 }

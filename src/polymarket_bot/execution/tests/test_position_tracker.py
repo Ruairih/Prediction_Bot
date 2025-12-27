@@ -223,8 +223,10 @@ class TestPositionClosure:
 
         assert position_call is not None
         assert position_call.args[9] == exit_order_id
-        assert isinstance(position_call.args[10], str)
-        assert position_call.args[10].endswith("Z")
+        assert position_call.args[10] is False
+        assert position_call.args[11] == "filled"
+        assert isinstance(position_call.args[12], str)
+        assert position_call.args[12].endswith("Z")
 
 
 class TestPositionLoading:

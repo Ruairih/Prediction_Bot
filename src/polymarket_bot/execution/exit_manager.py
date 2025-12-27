@@ -187,7 +187,7 @@ class ExitManager:
         reason: str,
         wait_for_fill: bool = True,
         fill_timeout_seconds: float = 30.0,
-    ) -> bool:
+    ) -> tuple[bool, str | None]:
         """
         Execute an exit for a position.
 
@@ -197,21 +197,58 @@ class ExitManager:
         G4 Protection: Refreshes balance after exit to ensure accurate
         available balance for subsequent trades.
 
+        ATOMICITY FIX: Uses atomic database update to prevent duplicate
+        exit orders from concurrent calls. The pending flag is set BEFORE
+        order submission and uses a WHERE clause to ensure only one caller
+        succeeds.
+
         Args:
             position: Position to exit
             current_price: Current price for the exit
             reason: Reason for exiting
             wait_for_fill: Whether to wait for fill confirmation (default: True)
+                          If False, order is submitted but position is NOT closed.
+                          Background sync should close when order fills.
             fill_timeout_seconds: How long to wait for fill (default: 30s)
 
         Returns:
-            True if exit was executed successfully
+            Tuple of (success, order_id). When wait_for_fill=False, success=True
+            means order was submitted (not necessarily filled).
         """
         import asyncio
 
         order_id = None
 
         try:
+            # Check for existing pending exit and try to reconcile
+            if self._has_pending_exit(position):
+                pending_status = await self.reconcile_pending_exit(
+                    position,
+                    current_price=current_price,
+                    reason=reason,
+                    stale_after_seconds=fill_timeout_seconds,
+                )
+                if pending_status == "pending":
+                    logger.info(
+                        f"Exit already pending for {position.position_id} "
+                        f"(order_id={position.exit_order_id}); skipping new order"
+                    )
+                    return False, position.exit_order_id
+                if pending_status == "closed":
+                    return True, position.exit_order_id
+
+            # ATOMICITY FIX: Atomically claim the exit slot BEFORE submitting order
+            # This prevents race conditions where two concurrent calls both pass
+            # the _has_pending_exit check and submit duplicate orders.
+            claimed = await self._position_tracker.try_claim_exit_atomic(
+                position.position_id
+            )
+            if not claimed:
+                logger.info(
+                    f"Exit already claimed by another process for {position.position_id}"
+                )
+                return False, None
+
             # Submit sell order if client available
             if self._clob_client:
                 # py-clob-client requires OrderArgs object
@@ -236,10 +273,30 @@ class ExitManager:
                         f"Exit order for {position.position_id} returned no order_id. "
                         f"Position NOT closed to avoid desync."
                     )
-                    return False
+                    # Clear the claimed state since order failed
+                    await self._position_tracker.clear_exit_pending(
+                        position.position_id,
+                        exit_status="failed",
+                    )
+                    return False, None
+
+                # Update pending state with actual order_id
+                await self._position_tracker.mark_exit_pending(
+                    position.position_id,
+                    order_id,
+                )
+
+                # If not waiting for fill, return immediately after order submission
+                # Background sync will close the position when order fills
+                if not wait_for_fill:
+                    logger.info(
+                        f"Exit order {order_id} submitted for {position.position_id}; "
+                        f"not waiting for fill (background sync will close position)"
+                    )
+                    return True, order_id
 
                 # FIX: Wait for order fill (not just acceptance) before closing position
-                if wait_for_fill and order_id:
+                if order_id:
                     order_confirmed = await self._wait_for_order_fill(
                         order_id,
                         timeout_seconds=fill_timeout_seconds,
@@ -251,7 +308,11 @@ class ExitManager:
                             f"not confirmed within {fill_timeout_seconds}s. "
                             f"Position NOT closed to avoid desync."
                         )
-                        return False
+                        await self._position_tracker.set_exit_status(
+                            position.position_id,
+                            "timeout",
+                        )
+                        return False, order_id
 
             # Only close position after order confirmed (or no client)
             await self._position_tracker.close_position(
@@ -268,11 +329,28 @@ class ExitManager:
                 f"Executed exit for {position.position_id}: "
                 f"price={current_price}, reason={reason}"
             )
-            return True
+            return True, order_id
 
         except asyncio.CancelledError:
             # FIX: Re-raise CancelledError to allow graceful shutdown
-            logger.debug(f"Exit for {position.position_id} cancelled")
+            # Only clear pending state if order wasn't submitted yet
+            # If order_id is set, the order is live on CLOB - don't orphan it
+            logger.debug(f"Exit for {position.position_id} cancelled, order_id={order_id}")
+            if order_id is None:
+                # No order submitted yet - safe to clear pending
+                try:
+                    await self._position_tracker.clear_exit_pending(
+                        position.position_id,
+                        exit_status="cancelled",
+                    )
+                except Exception:
+                    pass  # Best effort cleanup on cancellation
+            else:
+                # Order is live - keep pending state so reconcile can handle it
+                logger.warning(
+                    f"Exit cancelled after order {order_id} submitted for {position.position_id}; "
+                    f"keeping pending state for reconciliation"
+                )
             raise
 
         except Exception as e:
@@ -280,7 +358,147 @@ class ExitManager:
                 f"Failed to execute exit for {position.position_id}: {e}. "
                 f"Order ID: {order_id}"
             )
-            return False
+            # Clear pending state on unexpected failure to allow retry
+            try:
+                await self._position_tracker.clear_exit_pending(
+                    position.position_id,
+                    exit_status="failed",
+                )
+            except Exception as clear_err:
+                logger.warning(f"Failed to clear exit pending: {clear_err}")
+            return False, order_id
+
+    async def reconcile_pending_exit(
+        self,
+        position: Position,
+        current_price: Optional[Decimal] = None,
+        reason: Optional[str] = None,
+        *,
+        stale_after_seconds: Optional[float] = None,
+    ) -> str:
+        """
+        Reconcile a pending exit order for a position.
+
+        Returns:
+            "pending" if the exit order is still live,
+            "closed" if the position was closed from a filled order,
+            "cleared" if the pending state was cleared (terminal/cancelled),
+            "none" if no pending exit exists.
+        """
+        if not self._has_pending_exit(position):
+            return "none"
+
+        if not position.exit_order_id:
+            # ATOMICITY FIX: "claiming" status means order submission is in-flight
+            # Don't clear it - that would create a race where another caller
+            # could claim while the first is still submitting
+            # BUT: if claiming has been stuck for too long (crash during submission),
+            # clear it to allow retry
+            if position.exit_status == "claiming":
+                # Check if claiming is stale (stuck for > 60 seconds)
+                claiming_timeout_seconds = 60.0
+                if stale_after_seconds:
+                    # Fetch position updated_at from DB to check staleness
+                    try:
+                        result = await self._db.fetchrow(
+                            "SELECT updated_at FROM positions WHERE token_id = $1 AND status = 'open'",
+                            position.token_id,
+                        )
+                        if result and result.get("updated_at"):
+                            updated_at = result["updated_at"]
+                            if isinstance(updated_at, str):
+                                updated_at = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+                            if updated_at.tzinfo is None:
+                                updated_at = updated_at.replace(tzinfo=timezone.utc)
+                            age_seconds = (datetime.now(timezone.utc) - updated_at).total_seconds()
+                            if age_seconds > claiming_timeout_seconds:
+                                logger.warning(
+                                    f"Position {position.position_id} stuck in claiming state "
+                                    f"for {age_seconds:.0f}s; clearing for retry"
+                                )
+                                await self._position_tracker.clear_exit_pending(
+                                    position.position_id,
+                                    exit_status="stale_claim",
+                                )
+                                return "cleared"
+                    except Exception as e:
+                        logger.warning(f"Error checking claiming staleness: {e}")
+
+                logger.debug(
+                    f"Position {position.position_id} in claiming state, "
+                    f"order submission in progress"
+                )
+                return "pending"
+
+            logger.warning(
+                f"Position {position.position_id} marked exit_pending without order_id; clearing"
+            )
+            await self._position_tracker.clear_exit_pending(
+                position.position_id,
+                exit_status="cleared",
+            )
+            return "cleared"
+
+        if not self._clob_client:
+            logger.warning(
+                f"Cannot reconcile exit order {position.exit_order_id} "
+                f"for {position.position_id} without CLOB client"
+            )
+            return "pending"
+
+        order = await self._fetch_order(position.exit_order_id)
+        if not order:
+            logger.warning(
+                f"Exit order {position.exit_order_id} "
+                f"for {position.position_id} not found; keeping pending"
+            )
+            return "pending"
+
+        status = str(order.get("status", "")).upper()
+        filled_size = self._coerce_float(order.get("filledSize", 0))
+        size = self._coerce_float(order.get("size", 0))
+
+        if status == "MATCHED" or (size > 0 and filled_size >= size):
+            exit_price = self._extract_exit_price(
+                order,
+                fallback=current_price or position.entry_price,
+            )
+            await self._position_tracker.close_position(
+                position.position_id,
+                exit_price=exit_price,
+                reason=reason or "exit_reconcile",
+                exit_order_id=position.exit_order_id,
+            )
+            return "closed"
+
+        if status in ("CANCELLED", "FAILED", "REJECTED", "EXPIRED"):
+            logger.warning(
+                f"Exit order {position.exit_order_id} terminal status {status}; clearing pending"
+            )
+            exit_status = "cancelled" if status == "CANCELLED" else "failed"
+            await self._position_tracker.clear_exit_pending(
+                position.position_id,
+                exit_status=exit_status,
+            )
+            return "cleared"
+
+        if stale_after_seconds:
+            created_at = self._extract_order_timestamp(order)
+            if created_at:
+                age_seconds = (datetime.now(timezone.utc) - created_at).total_seconds()
+                if age_seconds > stale_after_seconds:
+                    if self._cancel_exit_order(position.exit_order_id):
+                        logger.warning(
+                            f"Cancelled stale exit order {position.exit_order_id} "
+                            f"for {position.position_id} after {age_seconds:.0f}s"
+                        )
+                        await self._position_tracker.clear_exit_pending(
+                            position.position_id,
+                            exit_status="cancelled",
+                        )
+                        return "cleared"
+
+        return "pending"
 
     async def _wait_for_order_fill(
         self,
@@ -317,19 +535,14 @@ class ExitManager:
                 return False
 
             try:
-                # FIX: Use run_in_executor if client is sync, to avoid blocking event loop
-                loop = asyncio.get_event_loop()
-                if hasattr(self._clob_client, 'get_order_async'):
-                    result = await self._clob_client.get_order_async(order_id)
-                else:
-                    # Wrap sync call to not block event loop
-                    result = await loop.run_in_executor(
-                        None, self._clob_client.get_order, order_id
-                    )
+                result = await self._fetch_order(order_id)
+                if not result:
+                    await asyncio.sleep(poll_interval)
+                    continue
 
-                status = result.get("status", "").upper()
-                filled_size = float(result.get("filledSize", 0))
-                size = float(result.get("size", 0))
+                status = str(result.get("status", "")).upper()
+                filled_size = self._coerce_float(result.get("filledSize", 0))
+                size = self._coerce_float(result.get("size", 0))
 
                 # Order filled or fully matched
                 if status == "MATCHED" or (size > 0 and filled_size >= size):
@@ -364,6 +577,106 @@ class ExitManager:
             except Exception as e:
                 logger.warning(f"Error checking order {order_id} status: {e}")
                 await asyncio.sleep(poll_interval)
+
+    async def _fetch_order(self, order_id: str) -> Optional[dict[str, Any]]:
+        """Fetch order details from CLOB, handling sync/async clients."""
+        if not self._clob_client:
+            return None
+        try:
+            import asyncio
+
+            loop = asyncio.get_event_loop()
+            if hasattr(self._clob_client, "get_order_async"):
+                return await self._clob_client.get_order_async(order_id)
+            return await loop.run_in_executor(None, self._clob_client.get_order, order_id)
+        except Exception as e:
+            logger.warning(f"Error fetching order {order_id}: {e}")
+            return None
+
+    @staticmethod
+    def _coerce_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _coerce_decimal(value: Any) -> Optional[Decimal]:
+        if value is None:
+            return None
+        try:
+            return Decimal(str(value))
+        except Exception:
+            return None
+
+    def _extract_exit_price(self, order: dict[str, Any], *, fallback: Decimal) -> Decimal:
+        for key in ("avgPrice", "avgFillPrice", "avg_price", "price"):
+            value = self._coerce_decimal(order.get(key))
+            if value is not None:
+                return value
+        return fallback
+
+    def _extract_order_timestamp(self, order: dict[str, Any]) -> Optional[datetime]:
+        for key in (
+            "createdAt",
+            "created_at",
+            "created",
+            "timestamp",
+            "createdTime",
+            "createdTimestamp",
+        ):
+            parsed = self._parse_timestamp(order.get(key))
+            if parsed is not None:
+                return parsed
+        return None
+
+    @staticmethod
+    def _has_pending_exit(position: Position) -> bool:
+        if position.exit_pending:
+            return True
+        if position.exit_status in ("pending", "timeout"):
+            return True
+        if position.exit_order_id and not position.exit_status:
+            return True
+        return False
+
+    @staticmethod
+    def _parse_timestamp(value: Any) -> Optional[datetime]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            ts = float(value)
+            if ts > 1e12:
+                ts = ts / 1000.0
+            return datetime.fromtimestamp(ts, tz=timezone.utc)
+        if isinstance(value, str):
+            val = value.strip()
+            if not val:
+                return None
+            if val.isdigit():
+                ts = float(val)
+                if ts > 1e12:
+                    ts = ts / 1000.0
+                return datetime.fromtimestamp(ts, tz=timezone.utc)
+            try:
+                return datetime.fromisoformat(val.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        return None
+
+    def _cancel_exit_order(self, order_id: str) -> bool:
+        if not self._clob_client:
+            return False
+        for method_name in ("cancel", "cancel_order"):
+            cancel = getattr(self._clob_client, method_name, None)
+            if cancel:
+                try:
+                    cancel(order_id)
+                    return True
+                except Exception as e:
+                    logger.warning(f"Failed to cancel order {order_id}: {e}")
+                    return False
+        return False
 
     async def evaluate_all_positions(
         self,

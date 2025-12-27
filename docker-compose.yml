@@ -18,9 +18,11 @@ services:
       - ~/.codex:/home/dev/.codex
       - /home/z/Projects/Firinne/Github/PredictionM/nextgen_pipeline/data/guardrail.sqlite:/data/guardrail.sqlite:ro
     ports:
-      - "3000:3000"
-      - "9050:9050"   # Dashboard: Tailscale access at http://<ip>:9050
-      - "8000:8000"
+      - "${BIND_HOST:-0.0.0.0}:3000:3000"   # React dashboard
+      - "${BIND_HOST:-0.0.0.0}:3004:3004"   # Market Explorer frontend
+      - "${BIND_HOST:-0.0.0.0}:9050:9050"   # Flask trading dashboard
+      - "${BIND_HOST:-0.0.0.0}:8081:8081"   # Ingestion dashboard
+      - "${BIND_HOST:-0.0.0.0}:8000:8000"   # Market Explorer API
     environment:
       - DATABASE_URL=postgresql://predict:predict@postgres:5432/predict
       - REDIS_URL=redis://redis:6379

@@ -59,6 +59,14 @@ class EventProcessor:
         self._threshold = threshold
         self._max_trade_age_seconds = max_trade_age_seconds
 
+    def set_threshold(self, threshold: Decimal) -> None:
+        """Update the trigger threshold."""
+        self._threshold = threshold
+
+    def set_max_trade_age_seconds(self, max_trade_age_seconds: float) -> None:
+        """Update the max trade age filter."""
+        self._max_trade_age_seconds = max_trade_age_seconds
+
     def should_process(self, event: dict[str, Any]) -> bool:
         """
         Check if an event should be processed.
@@ -178,6 +186,17 @@ class EventProcessor:
         meta = await db.fetchrow(query, trigger_data.token_id)
 
         question = meta["question"] if meta else event.get("question", "")
+
+        # Fall back to explorer_markets if question is empty
+        if not question and trigger_data.condition_id:
+            explorer_query = """
+                SELECT question FROM explorer_markets
+                WHERE condition_id = $1
+                LIMIT 1
+            """
+            explorer_row = await db.fetchrow(explorer_query, trigger_data.condition_id)
+            if explorer_row and explorer_row.get("question"):
+                question = explorer_row["question"]
         outcome = meta["outcome"] if meta else event.get("outcome")
         outcome_index = meta["outcome_index"] if meta else event.get("outcome_index")
 
@@ -199,8 +218,13 @@ class EventProcessor:
             except (ValueError, TypeError):
                 pass
 
-        # Get model score
+        # Get model score - try event first, then SQLite bridge
         model_score = event.get("model_score")
+        if model_score is None and trigger_data.token_id:
+            # Fall back to legacy SQLite scores
+            from .score_bridge import get_score_bridge
+            bridge = get_score_bridge()
+            model_score, _ = bridge.get_score(trigger_data.token_id)
 
         return StrategyContext(
             condition_id=trigger_data.condition_id,
@@ -229,4 +253,7 @@ class EventProcessor:
         Returns:
             (should_reject, reason) tuple
         """
-        return apply_hard_filters(context)
+        return apply_hard_filters(
+            context,
+            max_trade_age_seconds=self._max_trade_age_seconds,
+        )

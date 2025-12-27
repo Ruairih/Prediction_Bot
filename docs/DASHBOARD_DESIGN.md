@@ -25,12 +25,16 @@
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| SSE real-time streaming | Partial | Endpoint exists but frontend uses polling |
-| Performance charts | Placeholder | Equity curve placeholder exists |
-| Kill switch API | Placeholder | Frontend button, no backend |
-| Strategy page | Placeholder | Basic UI, needs decision log API |
-| Risk page | Placeholder | Basic UI, needs parameter API |
-| Pause/Resume controls | TODO | Needs bot state control API |
+| SSE real-time streaming | Partial | SSE hook invalidates queries; emits price/signal/order/position/fill events |
+| Performance charts | ✅ Done | Real equity curve + PnL buckets |
+| Kill switch API | ✅ Done | /api/control/kill wired to bot shutdown |
+| Strategy page | ✅ Done | Live config + decision log |
+| Risk page | ✅ Done | Live limits + update API |
+| Pause/Resume controls | ✅ Done | /api/control/pause + /api/control/resume |
+| Manual order entry UI | ✅ Done | Markets detail panel |
+| Orderbook depth + slippage | ✅ Done | Tiered orderbook snapshots |
+| Order blotter | ✅ Done | Portfolio page order table |
+| Settings page | ✅ Done | API key + export tools |
 
 ### Architecture Decision
 
@@ -44,6 +48,198 @@
 ## Executive Summary
 
 The dashboard provides a React frontend connected to a Flask API. Focus on **explainability**, **control**, and **real-time awareness**.
+
+---
+
+## Professional Dashboard Replacement Spec (v2)
+
+This section defines the replacement dashboard for professional trading use. It supersedes the v1 layout and fills in missing trader-grade controls, data, and auditability. The v2 spec assumes real data (no mocks), full explainability, and operator-grade controls.
+
+### Goals
+
+- Trader-grade decision support: depth, liquidity, execution quality, and risk context in every view.
+- Explainability by default: every trade links to a full signal and filter trace.
+- Operator control: safe manual overrides, confirmations, and audit trail.
+- Real data fidelity: no hardcoded UI values; real-time updates with replay.
+
+### Primary Users
+
+- Operator: live monitoring, manual overrides, emergency controls.
+- Analyst: performance and attribution, no trading controls.
+- Debug: data health and ingestion issues.
+- Viewer: read-only view for audits or spectators.
+
+### Information Architecture (v2)
+
+| Page | Purpose |
+|------|---------|
+| Mission Control | KPIs, activity tape, health, and risk snapshot |
+| Portfolio | Positions, orders, exposure, exit controls |
+| Markets | Universe explorer and market detail |
+| Strategy | Signals, filters, model outputs, decision log |
+| Performance | PnL, equity curve, drawdown, attribution |
+| Risk | Limits, utilization, overrides |
+| Activity | Full audit log with trace view |
+| System | Ingestion, WebSocket, gotcha telemetry |
+| Settings | Preferences, API keys, exports |
+
+### Global Layout and Navigation
+
+- Top command bar: mode, balance, health, kill switch, and global actions.
+- Left nav: persistent, collapsible, with counters (open positions, breaches).
+- Right inspector: contextual panel for selected market or position.
+- Global search: market/question search and quick jump.
+
+### Data Contracts (Core Entities)
+
+Market
+- condition_id, market_id, question, category, end_time, resolved
+- yes_price, no_price, best_bid, best_ask, spread, mid_price
+- volume_24h, liquidity, open_interest, price_change_1h, price_change_24h
+
+Position
+- position_id, condition_id, token_id, side, size
+- entry_price, avg_price, current_price
+- entry_time, hold_days, status, exit_plan
+- unrealized_pnl, realized_pnl, pnl_percent
+
+Order
+- order_id, token_id, side, type, price, size
+- status, submitted_at, filled_at, slippage_bps, fees
+
+Signal
+- signal_id, condition_id, token_id, strategy
+- trigger_price, trigger_size, model_score, decision, reason
+- filter_results, confidence, created_at
+
+Risk
+- max_positions, max_exposure, per_market_cap, min_reserve
+- price_threshold, stop_loss, profit_target, utilization, breaches
+
+System
+- ws_connected, last_tick_age, ingestion_rate, error_rate
+- gotcha_counters (G1-G6), db_latency, api_latency
+
+### Real-Time Data Strategy
+
+Streaming (sub-1s)
+- price updates, order status, fills, bot state changes, alerts
+
+Fast polling (5-15s)
+- positions, balances, open orders, exposure, risk utilization
+
+Slow polling (60s)
+- performance aggregates, daily snapshots, attribution
+
+Replay
+- event cursor and replay window to avoid missed fills
+
+### Page Specifications (v2)
+
+Mission Control
+- KPI grid: total PnL, daily PnL, win rate, open positions, deployed, reserve
+- Live tape: signals, orders, fills, rejects with severity
+- Risk snapshot: exposure meter, reserve status, breach indicators
+- System pulse: WebSocket status, last tick age, error rate
+- Quick actions: pause, cancel all, flatten, kill switch
+
+Portfolio
+- Positions table: sortable by PnL, age, size, strategy
+- Order blotter: status, slippage, fees, and fill ratio
+- Position detail drawer: entry, exits, current market, and decision link
+- Manual actions: close, reduce, cancel/replace
+
+Markets
+- Universe grid: filters for category, price range, liquidity, days to resolution
+- Market detail: question, resolution rules, price chart, depth, spreads
+- Liquidity view: orderbook depth and slippage estimator by size
+
+Strategy
+- Decision pipeline: price update -> filters -> model -> decision
+- Signal log: filter outcomes, model score, confidence, reason
+- "Why this trade": trace view with each filter pass/fail
+
+Performance
+- Equity curve with drawdown overlay
+- Attribution by strategy, category, holding period
+- Execution quality: slippage distribution, fill rate, fees
+
+Risk
+- Limits panel with version history and confirmations
+- Exposure map: per category and per market
+- Overrides: pause, cooldown, per-market blocks
+
+Activity
+- Searchable audit log with trace view
+- Export to CSV/JSON by date and entity
+
+System
+- Ingestion health, WS reconnects, data staleness
+- Gotcha counters: stale trades filtered, orderbook mismatch, size backfill
+
+### Manual Overrides and Controls
+
+- Pause/Resume trading (system state toggle).
+- Cancel all open orders (with confirmation).
+- Flatten all positions (with confirmation).
+- Manual order entry with reason and size limits.
+- Manual close/partial close with price constraint.
+- Per-market block and per-strategy enable/disable.
+
+### Selected Bet (Market) Detail Data
+
+- Market summary: question, resolution rules, end time, status.
+- Pricing: best bid/ask, mid, spread, last trade, 1h/24h change.
+- Liquidity: depth within 1pct/5pct/10pct, volume, open interest.
+- Position context: size, avg entry, break-even, PnL, exit plan.
+- Signal context: last signal, model score, filter outcomes, reason.
+- Execution context: open orders, last fill, slippage, fees.
+
+### API Requirements
+
+REST
+- GET /api/status
+- GET /api/positions
+- GET /api/orders
+- GET /api/metrics
+- GET /api/markets
+- GET /api/market/{condition_id}
+- GET /api/market/{condition_id}/history
+- GET /api/market/{condition_id}/orderbook
+- GET /api/signals
+- GET /api/decisions
+- GET /api/activity
+- POST /api/control/pause
+- POST /api/control/resume
+- POST /api/control/kill
+- POST /api/orders/cancel_all
+- POST /api/positions/{id}/close
+
+Streaming
+- /api/stream (SSE or WS)
+- events: price, signal, order, fill, position, bot_state, alert
+
+### Security and Permissions
+
+- Localhost binding by default, API key required when exposed.
+- Read-only role and operator role separation.
+- Audit log for all manual actions and limit changes.
+
+### Non-Functional Requirements
+
+- UI latency < 1s for streaming updates.
+- Polling data freshness < 15s for positions and orders.
+- Clear error states and stale data labeling.
+- Auditability: every action links to stored record.
+
+### Implementation Phases
+
+1. Data contracts and streaming event support.
+2. Mission Control and Portfolio rebuild with live data.
+3. Markets and detail panel with orderbook and history.
+4. Strategy explainability and decision trace.
+5. Performance analytics and attribution.
+6. Risk controls and manual overrides.
 
 ---
 

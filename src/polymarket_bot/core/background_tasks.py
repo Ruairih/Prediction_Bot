@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Callable, Optional, List, Any
 if TYPE_CHECKING:
     from polymarket_bot.core.engine import TradingEngine
     from polymarket_bot.execution import ExecutionService
+    from polymarket_bot.execution.position_sync import PositionSyncService
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,14 @@ class BackgroundTaskConfig:
     # Exit evaluation
     exit_eval_interval_seconds: float = 60
     exit_eval_enabled: bool = True
+
+    # Position sync from Polymarket (detects external trades)
+    # Quick sync: fast size updates (every 2 minutes)
+    position_sync_interval_seconds: float = 120  # 2 minutes
+    position_sync_enabled: bool = True
+    # Full sync: imports new positions, detects closed (every 15 minutes)
+    full_position_sync_interval_seconds: float = 900  # 15 minutes
+    full_position_sync_enabled: bool = True
 
 
 class BackgroundTasksManager:
@@ -63,6 +72,8 @@ class BackgroundTasksManager:
         execution_service: Optional["ExecutionService"] = None,
         config: Optional[BackgroundTaskConfig] = None,
         price_fetcher: Optional[Callable[[List[str]], Any]] = None,
+        position_sync_service: Optional["PositionSyncService"] = None,
+        wallet_address: Optional[str] = None,
     ) -> None:
         """
         Initialize the background tasks manager.
@@ -73,15 +84,20 @@ class BackgroundTasksManager:
             config: Task configuration
             price_fetcher: Optional async callback to get prices for token_ids.
                            Should accept list of token_ids and return dict of {token_id: Decimal}
+            position_sync_service: PositionSyncService for syncing external trades
+            wallet_address: Polymarket wallet address for position sync
         """
         self._engine = engine
         self._execution_service = execution_service
         self._config = config or BackgroundTaskConfig()
         self._price_fetcher = price_fetcher
+        self._position_sync_service = position_sync_service
+        self._wallet_address = wallet_address
 
         self._running = False
         self._tasks: List[asyncio.Task] = []
         self._stop_event = asyncio.Event()
+        self._last_full_sync = datetime.min.replace(tzinfo=timezone.utc)
 
     @property
     def is_running(self) -> bool:
@@ -131,6 +147,27 @@ class BackgroundTasksManager:
                 f"Started exit evaluation task "
                 f"(interval={self._config.exit_eval_interval_seconds}s)"
             )
+
+        # Position sync from Polymarket (detects external trades)
+        if (self._config.position_sync_enabled
+            and self._position_sync_service
+            and self._wallet_address):
+            task = asyncio.create_task(
+                self._position_sync_loop(),
+                name="position_sync",
+            )
+            self._tasks.append(task)
+            logger.info(
+                f"Started position sync task "
+                f"(quick={self._config.position_sync_interval_seconds}s, "
+                f"full={self._config.full_position_sync_interval_seconds}s)"
+            )
+        elif self._config.position_sync_enabled:
+            if not self._wallet_address:
+                logger.warning(
+                    "Position sync enabled but no wallet_address configured. "
+                    "External trades will not be detected automatically."
+                )
 
         logger.info(f"Background tasks started: {len(self._tasks)} tasks")
 
@@ -335,3 +372,94 @@ class BackgroundTasksManager:
             except Exception as e:
                 logger.error(f"Error in exit evaluation: {e}")
                 await asyncio.sleep(5)
+
+    async def _position_sync_loop(self) -> None:
+        """
+        Periodically sync positions from Polymarket.
+
+        Detects external trades made on Polymarket UI or other tools.
+        Uses two sync strategies:
+        - Quick sync: fast size updates (every 2 minutes)
+        - Full sync: imports new positions, detects closed (every 15 minutes)
+        """
+        quick_interval = self._config.position_sync_interval_seconds
+        full_interval = self._config.full_position_sync_interval_seconds
+
+        while self._running:
+            try:
+                # Wait for interval or stop
+                try:
+                    await asyncio.wait_for(
+                        self._stop_event.wait(),
+                        timeout=quick_interval,
+                    )
+                    break  # Stop requested
+                except asyncio.TimeoutError:
+                    pass  # Continue with sync
+
+                if not self._running:
+                    break
+
+                now = datetime.now(timezone.utc)
+                time_since_full = (now - self._last_full_sync).total_seconds()
+
+                # Decide: full sync or quick sync
+                if (self._config.full_position_sync_enabled
+                    and time_since_full >= full_interval):
+                    # Full sync: imports new positions, detects closed
+                    logger.info("Running full position sync from Polymarket...")
+                    try:
+                        result = await self._position_sync_service.sync_positions(
+                            wallet_address=self._wallet_address,
+                            dry_run=False,
+                            hold_policy="new",  # New imports get 7-day hold
+                        )
+                        self._last_full_sync = now
+
+                        if result.positions_imported > 0:
+                            logger.info(
+                                f"Position sync: imported {result.positions_imported} "
+                                f"new positions from Polymarket"
+                            )
+                        if result.positions_updated > 0:
+                            logger.info(
+                                f"Position sync: updated {result.positions_updated} "
+                                f"position sizes"
+                            )
+                        if result.positions_closed > 0:
+                            logger.info(
+                                f"Position sync: marked {result.positions_closed} "
+                                f"positions as closed (sold externally)"
+                            )
+                        if result.errors:
+                            logger.warning(
+                                f"Position sync errors: {result.errors}"
+                            )
+
+                    except Exception as e:
+                        logger.error(f"Full position sync failed: {e}")
+
+                else:
+                    # Quick sync: just update sizes (fast)
+                    logger.debug("Running quick position size sync...")
+                    try:
+                        result = await self._position_sync_service.quick_sync_sizes(
+                            wallet_address=self._wallet_address,
+                        )
+                        if result.get("updated", 0) > 0:
+                            logger.info(
+                                f"Quick sync: updated {result['updated']} position sizes"
+                            )
+                        if result.get("closed", 0) > 0:
+                            logger.info(
+                                f"Quick sync: {result['closed']} positions closed externally"
+                            )
+
+                    except Exception as e:
+                        logger.warning(f"Quick position sync failed: {e}")
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in position sync: {e}")
+                await asyncio.sleep(10)  # Longer pause on unexpected error

@@ -8,12 +8,43 @@ import type {
   BotStatus,
   DashboardMetrics,
   Position,
+  Order,
   ActivityEvent,
+  MarketSummary,
+  RiskStatus,
+  PerformanceStats,
+  EquityPoint,
+  Trade,
+  PnlBucket,
   SystemHealth,
   ServiceStatus,
+  SystemConfig,
+  LogEntry,
+  StrategyConfig,
+  Signal,
+  MarketDetailResponse,
+  MarketOrderbook,
+  MarketTrade,
 } from '../types';
 
-const API_BASE = '';  // Vite proxy handles /api -> localhost:5050
+const API_BASE = '';  // Vite proxy handles /api -> localhost:9050
+const API_KEY_STORAGE = 'dashboard_api_key';
+
+function getApiKey(): string | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  return window.localStorage.getItem(API_KEY_STORAGE);
+}
+
+async function apiFetch(input: RequestInfo, init: RequestInit = {}) {
+  const headers = new Headers(init.headers ?? {});
+  const apiKey = getApiKey();
+  if (apiKey) {
+    headers.set('X-API-Key', apiKey);
+  }
+  return fetch(input, { ...init, headers });
+}
 
 /**
  * Raw API response types (snake_case from Flask)
@@ -32,6 +63,32 @@ interface RawMetrics {
   calculated_at: string;
 }
 
+interface RawStatus {
+  mode: BotStatus['mode'];
+  status: BotStatus['status'];
+  last_heartbeat: string;
+  last_trade_time: string | null;
+  error_rate: number;
+  websocket_connected: boolean;
+  version: string;
+}
+
+interface RawRisk {
+  current_exposure: number;
+  exposure_percent: number;
+  balance_health: number;
+  limits: {
+    max_position_size: number;
+    max_total_exposure: number;
+    max_positions: number;
+    min_balance_reserve: number;
+    price_threshold: number;
+    stop_loss: number;
+    profit_target: number;
+    min_hold_days: number;
+  };
+}
+
 interface RawPosition {
   position_id: string;
   token_id: string;
@@ -45,6 +102,119 @@ interface RawPosition {
   realized_pnl: number;
   status: string;
   description?: string;
+}
+
+interface RawMarketDetail {
+  market: {
+    market_id: string | null;
+    condition_id: string;
+    question: string;
+    category: string | null;
+    best_bid: number | null;
+    best_ask: number | null;
+    mid_price: number | null;
+    spread: number | null;
+    liquidity: number | null;
+    volume: number | null;
+    end_date: string | null;
+    updated_at: string | null;
+    model_score?: number | null;
+    time_to_end_hours?: number | null;
+    filter_rejections?: number | null;
+  };
+  position: {
+    position_id: string;
+    token_id: string;
+    size: number;
+    entry_price: number;
+    entry_cost: number;
+    current_price: number | null;
+    current_value: number | null;
+    unrealized_pnl: number | null;
+    realized_pnl: number;
+    entry_time: string | null;
+    status: string | null;
+    side: string | null;
+    outcome: string | null;
+    pnl_percent: number | null;
+  } | null;
+  orders: Array<{
+    order_id: string;
+    token_id: string;
+    side: string | null;
+    price: number;
+    size: number;
+    status: string | null;
+    submitted_at: string | null;
+  }>;
+  tokens: Array<{
+    token_id: string;
+    outcome: string | null;
+    outcome_index: number | null;
+  }>;
+  last_signal: {
+    token_id: string | null;
+    status: string;
+    decision: string;
+    price: number;
+    threshold: number;
+    model_score: number | null;
+    created_at: string | null;
+  } | null;
+  last_fill: {
+    order_id: string;
+    token_id: string;
+    side: string | null;
+    price: number;
+    size: number;
+    filled_size: number;
+    avg_fill_price: number | null;
+    slippage_bps: number | null;
+    status: string | null;
+    filled_at: string | null;
+  } | null;
+  last_trade: {
+    trade_id: string;
+    price: number;
+    size: number;
+    side: string | null;
+    timestamp: string | null;
+  } | null;
+}
+
+interface RawOrderbook {
+  condition_id: string;
+  token_id: string | null;
+  snapshot_at?: string | null;
+  best_bid?: number | null;
+  best_ask?: number | null;
+  mid_price?: number | null;
+  spread?: number | null;
+  bids: Array<{ price: number; size: number }>;
+  asks: Array<{ price: number; size: number }>;
+  depth?: {
+    bid: { pct1: number; pct5: number; pct10: number };
+    ask: { pct1: number; pct5: number; pct10: number };
+  };
+  slippage?: {
+    buy: Array<{ size: number; avg_price: number | null; slippage_bps: number | null }>;
+    sell: Array<{ size: number; avg_price: number | null; slippage_bps: number | null }>;
+  };
+  source?: string;
+}
+
+interface RawOrder {
+  order_id: string;
+  token_id: string;
+  condition_id: string;
+  side?: 'BUY' | 'SELL' | null;
+  order_price?: number | null;
+  order_size?: number | null;
+  fill_price?: number | null;
+  fill_size?: number | null;
+  status: string;
+  submitted_at: string;
+  filled_at?: string | null;
 }
 
 interface RawHealthComponent {
@@ -70,27 +240,93 @@ interface RawTrigger {
   triggered_at: string;
 }
 
+interface RawMarket {
+  market_id: string;
+  condition_id: string | null;
+  question: string;
+  category: string | null;
+  best_bid: number | null;
+  best_ask: number | null;
+  volume: number | null;
+  liquidity: number | null;
+  end_date: string | null;
+  generated_at: string | null;
+}
+
+interface RawPerformance {
+  stats: {
+    total_pnl: number;
+    win_rate: number;
+    total_trades: number;
+    sharpe_ratio: number;
+    max_drawdown: number;
+    max_drawdown_percent: number;
+    profit_factor: number;
+    avg_win: number;
+    avg_loss: number;
+    best_trade: number;
+    worst_trade: number;
+  };
+  equity: EquityPoint[];
+  trades: Array<{
+    trade_id: string;
+    position_id: string;
+    token_id: string;
+    question: string;
+    side: Trade['side'];
+    size: number;
+    entry_price: number;
+    exit_price: number;
+    pnl: number;
+    pnl_percent: number;
+    opened_at: string;
+    closed_at: string;
+    holding_period: number;
+    category: string;
+  }>;
+  pnl: {
+    daily: Array<{ period: string; pnl: number; trades: number; wins: number; losses: number }>;
+    weekly: Array<{ period: string; pnl: number; trades: number; wins: number; losses: number }>;
+    monthly: Array<{ period: string; pnl: number; trades: number; wins: number; losses: number }>;
+  };
+}
+
+interface RawSystemConfig {
+  environment: SystemConfig['environment'];
+  version: string;
+  commit_hash: string;
+  api_base_url: string;
+  ws_base_url: string;
+  features: Record<string, boolean>;
+  uptime: number;
+}
+
 /**
  * Fetch health status from /health endpoint
  */
 export async function fetchHealth(): Promise<SystemHealth> {
-  const response = await fetch(`${API_BASE}/health`);
+  const response = await apiFetch(`${API_BASE}/health`);
   if (!response.ok) {
     throw new Error(`Health check failed: ${response.status}`);
   }
 
   const data: RawHealth = await response.json();
 
+  const normalizeStatus = (status: string) => {
+    if (status === 'warning') return 'degraded';
+    return status as ServiceStatus['status'];
+  };
+
   const services: ServiceStatus[] = data.components.map((c) => ({
     name: c.component,
-    status: c.status as 'healthy' | 'degraded' | 'unhealthy' | 'unknown',
+    status: normalizeStatus(c.status),
     latencyMs: c.latency_ms,
     lastChecked: data.checked_at,
     message: c.message,
   }));
 
   return {
-    overall: data.status as 'healthy' | 'degraded' | 'unhealthy' | 'unknown',
+    overall: normalizeStatus(data.status),
     services,
     websocket: {
       connected: services.some((s) => s.name === 'websocket' && s.status === 'healthy'),
@@ -114,36 +350,29 @@ export async function fetchHealth(): Promise<SystemHealth> {
  * Fetch bot status (derived from health)
  */
 export async function fetchBotStatus(): Promise<BotStatus> {
-  try {
-    const health = await fetchHealth();
-
-    return {
-      mode: 'dry_run',  // TODO: Get from API
-      status: health.overall as 'healthy' | 'degraded' | 'unhealthy',
-      lastHeartbeat: health.lastHealthCheck,
-      lastTradeTime: null,
-      errorRate: 0,
-      websocketConnected: health.websocket.connected,
-      version: '1.0.0',
-    };
-  } catch {
-    return {
-      mode: 'stopped',
-      status: 'unhealthy',
-      lastHeartbeat: new Date().toISOString(),
-      lastTradeTime: null,
-      errorRate: 1,
-      websocketConnected: false,
-      version: '1.0.0',
-    };
+  const response = await apiFetch(`${API_BASE}/api/status`);
+  if (!response.ok) {
+    throw new Error(`Status fetch failed: ${response.status}`);
   }
+
+  const data: RawStatus = await response.json();
+
+  return {
+    mode: data.mode,
+    status: data.status,
+    lastHeartbeat: data.last_heartbeat,
+    lastTradeTime: data.last_trade_time,
+    errorRate: data.error_rate,
+    websocketConnected: data.websocket_connected,
+    version: data.version,
+  };
 }
 
 /**
  * Fetch metrics from /api/metrics endpoint
  */
 export async function fetchMetrics(): Promise<DashboardMetrics> {
-  const response = await fetch(`${API_BASE}/api/metrics`);
+  const response = await apiFetch(`${API_BASE}/api/metrics`);
   if (!response.ok) {
     throw new Error(`Metrics fetch failed: ${response.status}`);
   }
@@ -165,10 +394,68 @@ export async function fetchMetrics(): Promise<DashboardMetrics> {
 }
 
 /**
+ * Fetch risk limits and utilization
+ */
+export async function fetchRisk(): Promise<RiskStatus> {
+  const response = await apiFetch(`${API_BASE}/api/risk`);
+  if (!response.ok) {
+    throw new Error(`Risk fetch failed: ${response.status}`);
+  }
+
+  const data: RawRisk = await response.json();
+
+  return {
+    currentExposure: data.current_exposure ?? 0,
+    exposurePercent: data.exposure_percent ?? 0,
+    balanceHealth: data.balance_health ?? 0,
+    limits: {
+      maxPositionSize: data.limits?.max_position_size ?? 0,
+      maxTotalExposure: data.limits?.max_total_exposure ?? 0,
+      maxPositions: data.limits?.max_positions ?? 0,
+      minBalanceReserve: data.limits?.min_balance_reserve ?? 0,
+      priceThreshold: data.limits?.price_threshold ?? 0,
+      stopLoss: data.limits?.stop_loss ?? 0,
+      profitTarget: data.limits?.profit_target ?? 0,
+      minHoldDays: data.limits?.min_hold_days ?? 0,
+    },
+  };
+}
+
+/**
+ * Update risk limits
+ */
+export async function updateRiskLimits(payload: Partial<RiskStatus['limits']>): Promise<RiskStatus> {
+  const response = await apiFetch(`${API_BASE}/api/risk`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(`Risk update failed: ${response.status}`);
+  }
+  const data: RawRisk = await response.json();
+  return {
+    currentExposure: data.current_exposure ?? 0,
+    exposurePercent: data.exposure_percent ?? 0,
+    balanceHealth: data.balance_health ?? 0,
+    limits: {
+      maxPositionSize: data.limits?.max_position_size ?? 0,
+      maxTotalExposure: data.limits?.max_total_exposure ?? 0,
+      maxPositions: data.limits?.max_positions ?? 0,
+      minBalanceReserve: data.limits?.min_balance_reserve ?? 0,
+      priceThreshold: data.limits?.price_threshold ?? 0,
+      stopLoss: data.limits?.stop_loss ?? 0,
+      profitTarget: data.limits?.profit_target ?? 0,
+      minHoldDays: data.limits?.min_hold_days ?? 0,
+    },
+  };
+}
+
+/**
  * Fetch positions from /api/positions endpoint
  */
 export async function fetchPositions(): Promise<Position[]> {
-  const response = await fetch(`${API_BASE}/api/positions`);
+  const response = await apiFetch(`${API_BASE}/api/positions`);
   if (!response.ok) {
     throw new Error(`Positions fetch failed: ${response.status}`);
   }
@@ -202,31 +489,486 @@ export async function fetchPositions(): Promise<Position[]> {
 }
 
 /**
+ * Fetch orders from /api/orders endpoint
+ */
+export async function fetchOrders(limit = 200): Promise<Order[]> {
+  const response = await apiFetch(`${API_BASE}/api/orders?limit=${limit}`);
+  if (!response.ok) {
+    throw new Error(`Orders fetch failed: ${response.status}`);
+  }
+
+  const data: { orders: RawOrder[] } = await response.json();
+
+  return (data.orders ?? []).map((order) => ({
+    orderId: order.order_id,
+    tokenId: order.token_id,
+    conditionId: order.condition_id,
+    question: `Order ${order.token_id.slice(0, 6)}...`,
+    side: (order.side ?? 'BUY') as Order['side'],
+    price: order.order_price ?? 0,
+    size: order.order_size ?? 0,
+    filledSize: order.fill_size ?? 0,
+    status: order.status as Order['status'],
+    createdAt: order.submitted_at,
+    updatedAt: order.filled_at ?? order.submitted_at,
+    slippage: order.fill_price && order.order_price
+      ? ((order.fill_price - order.order_price) / order.order_price) * 10000
+      : undefined,
+  }));
+}
+
+/**
+ * Fetch markets from /api/markets endpoint
+ */
+export async function fetchMarkets(params?: { limit?: number; q?: string; category?: string }): Promise<MarketSummary[]> {
+  const searchParams = new URLSearchParams();
+  if (params?.limit) searchParams.set('limit', String(params.limit));
+  if (params?.q) searchParams.set('q', params.q);
+  if (params?.category) searchParams.set('category', params.category);
+
+  const url = `${API_BASE}/api/markets${searchParams.toString() ? `?${searchParams.toString()}` : ''}`;
+  const response = await apiFetch(url);
+  if (!response.ok) {
+    throw new Error(`Markets fetch failed: ${response.status}`);
+  }
+
+  const data: { markets: RawMarket[] } = await response.json();
+
+  return data.markets.map((market) => {
+    const bestBid = market.best_bid ?? null;
+    const bestAsk = market.best_ask ?? null;
+    const midPrice = bestBid !== null && bestAsk !== null ? (bestBid + bestAsk) / 2 : bestBid ?? bestAsk;
+    const spread = bestBid !== null && bestAsk !== null ? bestAsk - bestBid : null;
+
+    return {
+      marketId: market.market_id,
+      conditionId: market.condition_id ?? null,
+      question: market.question,
+      category: market.category ?? null,
+      bestBid,
+      bestAsk,
+      midPrice,
+      spread,
+      volume: market.volume ?? null,
+      liquidity: market.liquidity ?? null,
+      endDate: market.end_date ?? null,
+      updatedAt: market.generated_at ?? null,
+    };
+  });
+}
+
+/**
+ * Fetch activity events from /api/activity
+ */
+export async function fetchActivity(limit = 200): Promise<ActivityEvent[]> {
+  const response = await apiFetch(`${API_BASE}/api/activity?limit=${limit}`);
+  if (!response.ok) {
+    throw new Error(`Activity fetch failed: ${response.status}`);
+  }
+
+  const data: { events: ActivityEvent[] } = await response.json();
+  return data.events ?? [];
+}
+
+/**
  * Fetch recent triggers from /api/triggers endpoint
  */
 export async function fetchTriggers(limit = 50): Promise<ActivityEvent[]> {
-  const response = await fetch(`${API_BASE}/api/triggers?limit=${limit}`);
+  return fetchActivity(limit);
+}
+
+/**
+ * Fetch performance summary from /api/performance
+ */
+export async function fetchPerformance(rangeDays?: number, limit = 200): Promise<{
+  stats: PerformanceStats;
+  equity: EquityPoint[];
+  trades: Trade[];
+  pnl: { daily: PnlBucket[]; weekly: PnlBucket[]; monthly: PnlBucket[] };
+}> {
+  const searchParams = new URLSearchParams();
+  if (rangeDays) searchParams.set('range_days', String(rangeDays));
+  if (limit) searchParams.set('limit', String(limit));
+
+  const response = await apiFetch(`${API_BASE}/api/performance?${searchParams.toString()}`);
   if (!response.ok) {
-    throw new Error(`Triggers fetch failed: ${response.status}`);
+    throw new Error(`Performance fetch failed: ${response.status}`);
   }
 
-  const data: { triggers: RawTrigger[] } = await response.json();
+  const data: RawPerformance = await response.json();
 
-  return data.triggers.map((t, index) => ({
-    id: `trigger-${index}-${t.triggered_at}`,
-    type: 'signal' as const,
-    timestamp: t.triggered_at,
-    summary: `Trigger @ $${t.price?.toFixed(2) ?? '?'} (size: ${t.trade_size ?? '?'})`,
-    details: {
-      tokenId: t.token_id,
-      conditionId: t.condition_id,
-      threshold: t.threshold,
-      price: t.price,
-      tradeSize: t.trade_size,
-      modelScore: t.model_score,
+  return {
+    stats: {
+      totalPnl: data.stats.total_pnl ?? 0,
+      winRate: data.stats.win_rate ?? 0,
+      totalTrades: data.stats.total_trades ?? 0,
+      sharpeRatio: data.stats.sharpe_ratio ?? 0,
+      maxDrawdown: data.stats.max_drawdown ?? 0,
+      maxDrawdownPercent: data.stats.max_drawdown_percent ?? 0,
+      profitFactor: data.stats.profit_factor ?? 0,
+      avgWin: data.stats.avg_win ?? 0,
+      avgLoss: data.stats.avg_loss ?? 0,
+      bestTrade: data.stats.best_trade ?? 0,
+      worstTrade: data.stats.worst_trade ?? 0,
     },
-    severity: 'info' as const,
+    equity: data.equity ?? [],
+    trades: (data.trades ?? []).map((trade) => ({
+      tradeId: trade.trade_id,
+      positionId: trade.position_id,
+      tokenId: trade.token_id,
+      question: trade.question,
+      side: trade.side,
+      size: trade.size,
+      entryPrice: trade.entry_price,
+      exitPrice: trade.exit_price,
+      pnl: trade.pnl,
+      pnlPercent: trade.pnl_percent,
+      openedAt: trade.opened_at,
+      closedAt: trade.closed_at,
+      holdingPeriod: trade.holding_period,
+      category: trade.category,
+    })),
+    pnl: {
+      daily: (data.pnl?.daily ?? []).map((bucket) => ({
+        period: bucket.period,
+        pnl: bucket.pnl,
+        trades: bucket.trades,
+        wins: bucket.wins,
+        losses: bucket.losses,
+      })),
+      weekly: (data.pnl?.weekly ?? []).map((bucket) => ({
+        period: bucket.period,
+        pnl: bucket.pnl,
+        trades: bucket.trades,
+        wins: bucket.wins,
+        losses: bucket.losses,
+      })),
+      monthly: (data.pnl?.monthly ?? []).map((bucket) => ({
+        period: bucket.period,
+        pnl: bucket.pnl,
+        trades: bucket.trades,
+        wins: bucket.wins,
+        losses: bucket.losses,
+      })),
+    },
+  };
+}
+
+/**
+ * Fetch system configuration
+ */
+export async function fetchSystemConfig(): Promise<SystemConfig> {
+  const response = await apiFetch(`${API_BASE}/api/system`);
+  if (!response.ok) {
+    throw new Error(`System config fetch failed: ${response.status}`);
+  }
+
+  const data: RawSystemConfig = await response.json();
+  return {
+    environment: data.environment,
+    version: data.version,
+    commitHash: data.commit_hash,
+    apiBaseUrl: data.api_base_url,
+    wsBaseUrl: data.ws_base_url,
+    features: data.features,
+    uptime: data.uptime,
+  };
+}
+
+/**
+ * Fetch log entries
+ */
+export async function fetchLogs(limit = 200): Promise<LogEntry[]> {
+  const response = await apiFetch(`${API_BASE}/api/logs?limit=${limit}`);
+  if (!response.ok) {
+    throw new Error(`Logs fetch failed: ${response.status}`);
+  }
+
+  const data: { logs: LogEntry[] } = await response.json();
+  return data.logs ?? [];
+}
+
+/**
+ * Fetch strategy configuration
+ */
+export async function fetchStrategy(): Promise<StrategyConfig> {
+  const response = await apiFetch(`${API_BASE}/api/strategy`);
+  if (!response.ok) {
+    throw new Error(`Strategy fetch failed: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * Fetch decision log
+ */
+export async function fetchDecisions(limit = 100): Promise<Signal[]> {
+  const response = await apiFetch(`${API_BASE}/api/decisions?limit=${limit}`);
+  if (!response.ok) {
+    throw new Error(`Decisions fetch failed: ${response.status}`);
+  }
+
+  const data: { decisions: Signal[] } = await response.json();
+  return data.decisions ?? [];
+}
+
+/**
+ * Fetch market detail
+ */
+export async function fetchMarketDetail(conditionId: string): Promise<MarketDetailResponse> {
+  const response = await apiFetch(`${API_BASE}/api/market/${conditionId}`);
+  if (!response.ok) {
+    throw new Error(`Market detail fetch failed: ${response.status}`);
+  }
+  const data: RawMarketDetail = await response.json();
+
+  return {
+    market: {
+      marketId: data.market.market_id,
+      conditionId: data.market.condition_id,
+      question: data.market.question,
+      category: data.market.category,
+      bestBid: data.market.best_bid,
+      bestAsk: data.market.best_ask,
+      midPrice: data.market.mid_price,
+      spread: data.market.spread,
+      liquidity: data.market.liquidity,
+      volume: data.market.volume,
+      endDate: data.market.end_date,
+      updatedAt: data.market.updated_at,
+      modelScore: data.market.model_score ?? null,
+      timeToEndHours: data.market.time_to_end_hours ?? null,
+      filterRejections: data.market.filter_rejections ?? null,
+    },
+    position: data.position
+      ? {
+          positionId: data.position.position_id,
+          tokenId: data.position.token_id,
+          size: data.position.size,
+          entryPrice: data.position.entry_price,
+          entryCost: data.position.entry_cost,
+          currentPrice: data.position.current_price,
+          currentValue: data.position.current_value,
+          unrealizedPnl: data.position.unrealized_pnl,
+          realizedPnl: data.position.realized_pnl,
+          entryTime: data.position.entry_time,
+          status: data.position.status,
+          side: data.position.side as 'BUY' | 'SELL' | null,
+          outcome: data.position.outcome,
+          pnlPercent: data.position.pnl_percent,
+        }
+      : null,
+    orders: (data.orders ?? []).map((order) => ({
+      orderId: order.order_id,
+      tokenId: order.token_id,
+      side: order.side as 'BUY' | 'SELL' | null,
+      price: order.price,
+      size: order.size,
+      status: order.status,
+      submittedAt: order.submitted_at,
+    })),
+    tokens: (data.tokens ?? []).map((token) => ({
+      tokenId: token.token_id,
+      outcome: token.outcome,
+      outcomeIndex: token.outcome_index,
+    })),
+    lastSignal: data.last_signal
+      ? {
+          tokenId: data.last_signal.token_id,
+          status: data.last_signal.status,
+          decision: data.last_signal.decision as 'entry' | 'exit' | 'watch' | 'hold' | 'reject',
+          price: data.last_signal.price,
+          threshold: data.last_signal.threshold,
+          modelScore: data.last_signal.model_score,
+          createdAt: data.last_signal.created_at,
+        }
+      : null,
+    lastFill: data.last_fill
+      ? {
+          orderId: data.last_fill.order_id,
+          tokenId: data.last_fill.token_id,
+          side: data.last_fill.side as 'BUY' | 'SELL' | null,
+          price: data.last_fill.price,
+          size: data.last_fill.size,
+          filledSize: data.last_fill.filled_size,
+          avgFillPrice: data.last_fill.avg_fill_price,
+          slippageBps: data.last_fill.slippage_bps,
+          status: data.last_fill.status,
+          filledAt: data.last_fill.filled_at,
+        }
+      : null,
+    lastTrade: data.last_trade
+      ? {
+          tradeId: data.last_trade.trade_id,
+          price: data.last_trade.price,
+          size: data.last_trade.size,
+          side: data.last_trade.side,
+          timestamp: data.last_trade.timestamp,
+        }
+      : null,
+  };
+}
+
+/**
+ * Fetch market trade history
+ */
+export async function fetchMarketHistory(conditionId: string, limit = 200): Promise<MarketTrade[]> {
+  const response = await apiFetch(`${API_BASE}/api/market/${conditionId}/history?limit=${limit}`);
+  if (!response.ok) {
+    throw new Error(`Market history fetch failed: ${response.status}`);
+  }
+  const data: { history: Array<{ trade_id: string; price: number; size: number; side: string; timestamp: string }> } =
+    await response.json();
+  return (data.history ?? []).map((trade) => ({
+    tradeId: trade.trade_id,
+    price: trade.price,
+    size: trade.size,
+    side: trade.side ?? null,
+    timestamp: trade.timestamp ?? null,
   }));
+}
+
+/**
+ * Fetch market orderbook
+ */
+export async function fetchMarketOrderbook(
+  conditionId: string,
+  tokenId?: string
+): Promise<MarketOrderbook> {
+  const params = tokenId ? `?token_id=${encodeURIComponent(tokenId)}` : '';
+  const response = await apiFetch(`${API_BASE}/api/market/${conditionId}/orderbook${params}`);
+  if (!response.ok) {
+    throw new Error(`Market orderbook fetch failed: ${response.status}`);
+  }
+  const data: RawOrderbook = await response.json();
+  return {
+    conditionId: data.condition_id,
+    tokenId: data.token_id ?? null,
+    snapshotAt: data.snapshot_at ?? null,
+    bestBid: data.best_bid ?? null,
+    bestAsk: data.best_ask ?? null,
+    midPrice: data.mid_price ?? null,
+    spread: data.spread ?? null,
+    bids: data.bids ?? [],
+    asks: data.asks ?? [],
+    depth: data.depth ?? { bid: { pct1: 0, pct5: 0, pct10: 0 }, ask: { pct1: 0, pct5: 0, pct10: 0 } },
+    slippage: data.slippage ?? { buy: [], sell: [] },
+    source: data.source ?? 'unavailable',
+  };
+}
+
+export async function submitManualOrder(payload: {
+  tokenId: string;
+  side: 'BUY' | 'SELL';
+  price: number;
+  size: number;
+  conditionId?: string;
+  reason?: string;
+}) {
+  const response = await apiFetch(`${API_BASE}/api/orders/manual`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      token_id: payload.tokenId,
+      side: payload.side,
+      price: payload.price,
+      size: payload.size,
+      condition_id: payload.conditionId,
+      reason: payload.reason,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`Manual order failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+/**
+ * Control actions
+ */
+export async function pauseTrading(reason?: string) {
+  const response = await apiFetch(`${API_BASE}/api/control/pause`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason }),
+  });
+  if (!response.ok) {
+    throw new Error(`Pause failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function resumeTrading() {
+  const response = await apiFetch(`${API_BASE}/api/control/resume`, { method: 'POST' });
+  if (!response.ok) {
+    throw new Error(`Resume failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function killTrading(reason?: string) {
+  const response = await apiFetch(`${API_BASE}/api/control/kill`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason }),
+  });
+  if (!response.ok) {
+    throw new Error(`Kill failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function cancelAllOrders() {
+  const response = await apiFetch(`${API_BASE}/api/orders/cancel_all`, { method: 'POST' });
+  if (!response.ok) {
+    throw new Error(`Cancel all orders failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function flattenPositions(reason?: string) {
+  const response = await apiFetch(`${API_BASE}/api/positions/flatten`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason }),
+  });
+  if (!response.ok) {
+    throw new Error(`Flatten positions failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function closePosition(positionId: string, price?: number, reason?: string, tokenId?: string) {
+  const response = await apiFetch(`${API_BASE}/api/positions/${positionId}/close`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ price, reason, token_id: tokenId }),
+  });
+  if (!response.ok) {
+    throw new Error(`Close position failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function blockMarket(conditionId: string, reason?: string, tokenId?: string) {
+  const response = await apiFetch(`${API_BASE}/api/market/${conditionId}/block`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason, token_id: tokenId }),
+  });
+  if (!response.ok) {
+    throw new Error(`Block market failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function unblockMarket(conditionId: string) {
+  const response = await apiFetch(`${API_BASE}/api/market/${conditionId}/block`, { method: 'DELETE' });
+  if (!response.ok) {
+    throw new Error(`Unblock market failed: ${response.status}`);
+  }
+  return response.json();
 }
 
 /**
@@ -237,7 +979,7 @@ export async function fetchDashboardData() {
     fetchBotStatus().catch(() => null),
     fetchMetrics().catch(() => null),
     fetchPositions().catch(() => []),
-    fetchTriggers(20).catch(() => []),
+    fetchActivity(20).catch(() => []),
   ]);
 
   return {
@@ -246,4 +988,177 @@ export async function fetchDashboardData() {
     positions,
     activity,
   };
+}
+
+// =============================================================================
+// Pipeline Visibility
+// =============================================================================
+
+import type {
+  PipelineStats,
+  PipelineFunnel,
+  RejectionEvent,
+  CandidateMarket,
+  RejectionStage,
+} from '../types';
+
+/**
+ * Fetch pipeline statistics
+ */
+export async function fetchPipelineStats(minutes = 60): Promise<PipelineStats> {
+  const response = await apiFetch(`${API_BASE}/api/pipeline/stats?minutes=${minutes}`);
+  if (!response.ok) {
+    throw new Error(`Pipeline stats fetch failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+/**
+ * Fetch pipeline funnel summary
+ */
+export async function fetchPipelineFunnel(minutes = 60): Promise<PipelineFunnel> {
+  const response = await apiFetch(`${API_BASE}/api/pipeline/funnel?minutes=${minutes}`);
+  if (!response.ok) {
+    throw new Error(`Pipeline funnel fetch failed: ${response.status}`);
+  }
+  const data = await response.json();
+  return {
+    funnel: data.funnel ?? [],
+    totalRejections: data.total_rejections ?? 0,
+    minutes: data.minutes ?? minutes,
+    samples: data.samples ?? {},
+    nearMissCount: data.near_miss_count ?? 0,
+    candidateCount: data.candidate_count ?? 0,
+  };
+}
+
+/**
+ * Fetch recent rejections
+ */
+export async function fetchPipelineRejections(
+  limit = 100,
+  stage?: RejectionStage
+): Promise<RejectionEvent[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (stage) {
+    params.set('stage', stage);
+  }
+  const response = await apiFetch(`${API_BASE}/api/pipeline/rejections?${params}`);
+  if (!response.ok) {
+    throw new Error(`Pipeline rejections fetch failed: ${response.status}`);
+  }
+  const data: { rejections: Array<{
+    token_id: string;
+    condition_id: string;
+    stage: RejectionStage;
+    timestamp: string;
+    price: number;
+    question: string;
+    trade_size: number | null;
+    trade_age_seconds: number | null;
+    rejection_values: Record<string, unknown>;
+  }> } = await response.json();
+  return (data.rejections ?? []).map((r) => ({
+    tokenId: r.token_id,
+    conditionId: r.condition_id,
+    stage: r.stage,
+    timestamp: r.timestamp,
+    price: r.price,
+    question: r.question,
+    tradeSize: r.trade_size,
+    tradeAgeSeconds: r.trade_age_seconds,
+    rejectionValues: r.rejection_values,
+  }));
+}
+
+/**
+ * Fetch candidate markets
+ */
+export async function fetchPipelineCandidates(
+  limit = 50,
+  sortBy: 'distance' | 'score' | 'recent' = 'distance'
+): Promise<CandidateMarket[]> {
+  const params = new URLSearchParams({ limit: String(limit), sort: sortBy });
+  const response = await apiFetch(`${API_BASE}/api/pipeline/candidates?${params}`);
+  if (!response.ok) {
+    throw new Error(`Pipeline candidates fetch failed: ${response.status}`);
+  }
+  const data: { candidates: Array<{
+    token_id: string;
+    condition_id: string;
+    question: string;
+    current_price: number;
+    threshold: number;
+    distance_to_threshold: number;
+    last_updated: string;
+    last_signal: string;
+    last_signal_reason: string;
+    model_score: number | null;
+    time_to_end_hours: number;
+    trade_size: number | null;
+    trade_age_seconds: number;
+    highest_price_seen: number;
+    times_evaluated: number;
+  }> } = await response.json();
+  return (data.candidates ?? []).map((c) => ({
+    tokenId: c.token_id,
+    conditionId: c.condition_id,
+    question: c.question,
+    currentPrice: c.current_price,
+    threshold: c.threshold,
+    distanceToThreshold: c.distance_to_threshold,
+    lastUpdated: c.last_updated,
+    lastSignal: c.last_signal,
+    lastSignalReason: c.last_signal_reason,
+    modelScore: c.model_score,
+    timeToEndHours: c.time_to_end_hours,
+    tradeSize: c.trade_size,
+    tradeAgeSeconds: c.trade_age_seconds,
+    highestPriceSeen: c.highest_price_seen,
+    timesEvaluated: c.times_evaluated,
+  }));
+}
+
+/**
+ * Fetch near-miss markets
+ */
+export async function fetchNearMisses(maxDistance = 0.02): Promise<CandidateMarket[]> {
+  const response = await apiFetch(`${API_BASE}/api/pipeline/near-misses?max_distance=${maxDistance}`);
+  if (!response.ok) {
+    throw new Error(`Near misses fetch failed: ${response.status}`);
+  }
+  const data: { near_misses: Array<{
+    token_id: string;
+    condition_id: string;
+    question: string;
+    current_price: number;
+    threshold: number;
+    distance_to_threshold: number;
+    last_updated: string;
+    last_signal: string;
+    last_signal_reason: string;
+    model_score: number | null;
+    time_to_end_hours: number;
+    trade_size: number | null;
+    trade_age_seconds: number;
+    highest_price_seen: number;
+    times_evaluated: number;
+  }> } = await response.json();
+  return (data.near_misses ?? []).map((c) => ({
+    tokenId: c.token_id,
+    conditionId: c.condition_id,
+    question: c.question,
+    currentPrice: c.current_price,
+    threshold: c.threshold,
+    distanceToThreshold: c.distance_to_threshold,
+    lastUpdated: c.last_updated,
+    lastSignal: c.last_signal,
+    lastSignalReason: c.last_signal_reason,
+    modelScore: c.model_score,
+    timeToEndHours: c.time_to_end_hours,
+    tradeSize: c.trade_size,
+    tradeAgeSeconds: c.trade_age_seconds,
+    highestPriceSeen: c.highest_price_seen,
+    timesEvaluated: c.times_evaluated,
+  }));
 }

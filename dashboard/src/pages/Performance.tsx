@@ -2,7 +2,6 @@
  * Performance Page
  * Charts, metrics, and trade history
  */
-import { useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { TimeRangeSelector } from '../components/performance/TimeRangeSelector';
 import { EquityCurveChart } from '../components/performance/EquityCurveChart';
@@ -12,110 +11,8 @@ import { TradeHistoryTable } from '../components/performance/TradeHistoryTable';
 import { PnlBreakdown } from '../components/performance/PnlBreakdown';
 import { Pagination } from '../components/common/Pagination';
 import { EmptyState } from '../components/common/EmptyState';
-import type { TimeRange, EquityPoint, PerformanceStats, Trade, PnlBucket } from '../types';
-
-// Mock data
-const generateEquityData = (): EquityPoint[] => {
-  const data: EquityPoint[] = [];
-  let equity = 400;
-  const now = Date.now();
-
-  for (let i = 30; i >= 0; i--) {
-    equity += Math.random() * 10 - 3;
-    data.push({
-      timestamp: new Date(now - i * 86400000).toISOString(),
-      equity: Math.max(equity, 350),
-    });
-  }
-
-  return data;
-};
-
-const mockEquityData = generateEquityData();
-
-const mockStats: PerformanceStats = {
-  totalPnl: 47.82,
-  winRate: 0.985,
-  totalTrades: 68,
-  sharpeRatio: 2.34,
-  maxDrawdown: 12.50,
-  maxDrawdownPercent: 3.2,
-  profitFactor: 4.8,
-  avgWin: 2.15,
-  avgLoss: 1.80,
-  bestTrade: 8.50,
-  worstTrade: 5.20,
-};
-
-const mockTrades: Trade[] = [
-  {
-    tradeId: '1',
-    positionId: 'pos1',
-    tokenId: 'token1',
-    question: 'Will Bitcoin reach $100k by end of 2024?',
-    side: 'BUY',
-    size: 50,
-    entryPrice: 0.45,
-    exitPrice: 0.52,
-    pnl: 3.50,
-    pnlPercent: 15.56,
-    openedAt: new Date(Date.now() - 86400000 * 5).toISOString(),
-    closedAt: new Date(Date.now() - 86400000 * 2).toISOString(),
-    holdingPeriod: 3,
-    category: 'Crypto',
-  },
-  {
-    tradeId: '2',
-    positionId: 'pos2',
-    tokenId: 'token2',
-    question: 'Will Fed cut rates in March?',
-    side: 'BUY',
-    size: 100,
-    entryPrice: 0.65,
-    exitPrice: 0.71,
-    pnl: 6.00,
-    pnlPercent: 9.23,
-    openedAt: new Date(Date.now() - 86400000 * 10).toISOString(),
-    closedAt: new Date(Date.now() - 86400000 * 7).toISOString(),
-    holdingPeriod: 3,
-    category: 'Economics',
-  },
-  {
-    tradeId: '3',
-    positionId: 'pos3',
-    tokenId: 'token3',
-    question: 'Will ETH merge happen on time?',
-    side: 'SELL',
-    size: 75,
-    entryPrice: 0.80,
-    exitPrice: 0.72,
-    pnl: -6.00,
-    pnlPercent: -10.0,
-    openedAt: new Date(Date.now() - 86400000 * 15).toISOString(),
-    closedAt: new Date(Date.now() - 86400000 * 12).toISOString(),
-    holdingPeriod: 3,
-    category: 'Crypto',
-  },
-];
-
-const mockDailyPnl: PnlBucket[] = [
-  { period: 'Today', pnl: 3.20, trades: 2, wins: 2, losses: 0 },
-  { period: 'Yesterday', pnl: -1.50, trades: 1, wins: 0, losses: 1 },
-  { period: 'Dec 19', pnl: 5.80, trades: 3, wins: 3, losses: 0 },
-  { period: 'Dec 18', pnl: 2.10, trades: 2, wins: 2, losses: 0 },
-  { period: 'Dec 17', pnl: 4.50, trades: 2, wins: 2, losses: 0 },
-];
-
-const mockWeeklyPnl: PnlBucket[] = [
-  { period: 'This Week', pnl: 12.50, trades: 8, wins: 7, losses: 1 },
-  { period: 'Last Week', pnl: 18.30, trades: 12, wins: 11, losses: 1 },
-  { period: 'Dec 9-15', pnl: 9.20, trades: 6, wins: 6, losses: 0 },
-];
-
-const mockMonthlyPnl: PnlBucket[] = [
-  { period: 'December', pnl: 47.82, trades: 68, wins: 67, losses: 1 },
-  { period: 'November', pnl: 32.50, trades: 45, wins: 43, losses: 2 },
-];
+import { usePerformance } from '../hooks/useDashboardData';
+import type { TimeRange } from '../types';
 
 const PAGE_SIZE = 10;
 
@@ -124,10 +21,27 @@ export function Performance() {
 
   const range = (searchParams.get('range') as TimeRange) || '30d';
   const rawPage = parseInt(searchParams.get('page') || '1', 10);
+  const rangeDays = range === '1d' ? 1 : range === '7d' ? 7 : range === '30d' ? 30 : range === '90d' ? 90 : undefined;
+  const { data: performanceData, isLoading, error } = usePerformance(rangeDays, 200);
 
-  const [equityData] = useState<EquityPoint[]>(mockEquityData);
-  const [stats] = useState<PerformanceStats>(mockStats);
-  const [trades] = useState<Trade[]>(mockTrades);
+  const stats = performanceData?.stats ?? {
+    totalPnl: 0,
+    winRate: 0,
+    totalTrades: 0,
+    sharpeRatio: 0,
+    maxDrawdown: 0,
+    maxDrawdownPercent: 0,
+    profitFactor: 0,
+    avgWin: 0,
+    avgLoss: 0,
+    bestTrade: 0,
+    worstTrade: 0,
+  };
+  const equityData = performanceData?.equity ?? [];
+  const trades = performanceData?.trades ?? [];
+  const pnlDaily = performanceData?.pnl.daily ?? [];
+  const pnlWeekly = performanceData?.pnl.weekly ?? [];
+  const pnlMonthly = performanceData?.pnl.monthly ?? [];
 
   // Clamp page to valid range
   const totalPages = Math.ceil(trades.length / PAGE_SIZE);
@@ -145,9 +59,8 @@ export function Performance() {
     setSearchParams(params);
   };
 
-  const handleTradeClick = (trade: Trade) => {
-    console.log('Trade clicked:', trade.tradeId);
-    // TODO: Implement trade details drawer
+  const handleTradeClick = (tradeId: string) => {
+    console.log('Trade clicked:', tradeId);
   };
 
   const paginatedTrades = trades.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
@@ -161,6 +74,18 @@ export function Performance() {
         </div>
         <TimeRangeSelector value={range} onChange={handleRangeChange} />
       </div>
+
+      {isLoading && (
+        <div className="text-sm text-text-secondary">Refreshing performance...</div>
+      )}
+
+      {error && (
+        <div className="bg-accent-red/10 border border-accent-red/30 rounded-2xl p-4">
+          <p className="text-accent-red">
+            Unable to load performance data. Ensure the monitoring API is running.
+          </p>
+        </div>
+      )}
 
       <PerformanceKpis stats={stats} />
 
@@ -183,7 +108,7 @@ export function Performance() {
             />
           ) : (
             <>
-              <TradeHistoryTable trades={paginatedTrades} onTradeClick={handleTradeClick} />
+              <TradeHistoryTable trades={paginatedTrades} onTradeClick={(trade) => handleTradeClick(trade.tradeId)} />
               <div data-testid="trade-pagination">
                 <Pagination
                   page={page}
@@ -196,7 +121,7 @@ export function Performance() {
           )}
         </div>
         <div>
-          <PnlBreakdown daily={mockDailyPnl} weekly={mockWeeklyPnl} monthly={mockMonthlyPnl} />
+          <PnlBreakdown daily={pnlDaily} weekly={pnlWeekly} monthly={pnlMonthly} />
         </div>
       </div>
     </div>

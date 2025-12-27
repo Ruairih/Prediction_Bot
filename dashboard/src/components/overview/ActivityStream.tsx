@@ -46,11 +46,19 @@ export function ActivityStream({
     return (
       <div
         data-testid="activity-stream"
-        className="bg-bg-secondary rounded-lg p-4 border border-border"
+        className="bg-bg-secondary rounded-2xl p-4 border border-border shadow-sm"
       >
-        <h3 className="text-lg font-semibold mb-4 text-text-primary">
-          Live Activity
-        </h3>
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <div className="text-[11px] uppercase tracking-[0.3em] text-text-secondary/70">
+              Activity
+            </div>
+            <h3 className="text-lg font-semibold text-text-primary">
+              Live Tape
+            </h3>
+          </div>
+          <span className="text-xs text-text-secondary">No recent events</span>
+        </div>
         <div className="text-text-secondary text-center py-8">
           {isLoading ? 'Loading activity...' : 'No activity yet'}
         </div>
@@ -61,11 +69,19 @@ export function ActivityStream({
   return (
     <div
       data-testid="activity-stream"
-      className="bg-bg-secondary rounded-lg p-4 border border-border"
+      className="bg-bg-secondary rounded-2xl p-4 border border-border shadow-sm"
     >
-      <h3 className="text-lg font-semibold mb-4 text-text-primary">
-        Live Activity
-      </h3>
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <div className="text-[11px] uppercase tracking-[0.3em] text-text-secondary/70">
+            Activity
+          </div>
+          <h3 className="text-lg font-semibold text-text-primary">
+            Live Tape
+          </h3>
+        </div>
+        <span className="text-xs text-text-secondary">{displayedEvents.length} events</span>
+      </div>
 
       <div className="space-y-2 max-h-80 overflow-y-auto" role="log" aria-live="polite" aria-label="Trading activity feed">
         {displayedEvents.map((event) => (
@@ -76,7 +92,7 @@ export function ActivityStream({
             data-severity={event.severity}
             onClick={() => onEventClick?.(event)}
             className={clsx(
-              'flex items-start gap-3 p-2 rounded-lg border-l-2 w-full text-left',
+              'flex items-start gap-3 p-3 rounded-xl border-l-2 w-full text-left border border-border/60',
               'hover:bg-bg-tertiary transition-colors focus:outline-none focus:ring-2 focus:ring-accent-blue',
               onEventClick ? 'cursor-pointer' : 'cursor-default',
               severityColors[event.severity]

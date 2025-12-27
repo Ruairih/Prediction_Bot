@@ -18,7 +18,8 @@
 10. [Safety & Risk Management](#safety--risk-management)
 11. [Database & Data](#database--data)
 12. [Troubleshooting](#troubleshooting)
-13. [Architecture Overview](#architecture-overview)
+13. [Production Deployment & Data Continuity](#production-deployment--data-continuity)
+14. [Architecture Overview](#architecture-overview)
 
 ---
 
@@ -50,8 +51,8 @@ This strategy has historically achieved a **99%+ win rate** on qualifying trades
 ## Quick Start
 
 ```bash
-# 1. Start the infrastructure (PostgreSQL + Redis)
-docker-compose up -d postgres redis
+# 1. Start the infrastructure (PostgreSQL)
+docker-compose up -d postgres
 
 # 2. Set up credentials (see Configuration section)
 cp .env.example .env
@@ -78,7 +79,6 @@ DRY_RUN=false python -m polymarket_bot.main --mode all
 |----------|---------|---------|
 | Python | 3.11+ | Runtime |
 | PostgreSQL | 15+ | Data storage |
-| Redis | 7+ | Caching (optional) |
 | Docker | 24+ | Container runtime (recommended) |
 
 ### Required Accounts & Credentials
@@ -157,6 +157,9 @@ DATABASE_URL=postgresql://predict:predict@localhost:5433/predict
 # For Docker, use service name:
 # DATABASE_URL=postgresql://predict:predict@postgres:5432/predict
 
+# Path to Polymarket API credentials file
+POLYMARKET_CREDS_PATH=./polymarket_api_creds.json
+
 # Trading mode - ALWAYS START WITH TRUE!
 DRY_RUN=true
 
@@ -200,6 +203,19 @@ STOP_LOSS=0.90
 
 # Days before applying exit rules (short positions hold to resolution)
 MIN_HOLD_DAYS=7
+
+# =============================================================================
+# POSITION SYNC (Recommended)
+# =============================================================================
+
+# Your Polymarket wallet address (enables automatic position reconciliation)
+WALLET_ADDRESS=0x...
+
+# Sync positions on startup (default: true)
+SYNC_POSITIONS_ON_STARTUP=true
+
+# Hold policy for imported positions: "new", "mature", or "actual"
+STARTUP_SYNC_HOLD_POLICY=new
 
 # =============================================================================
 # ALERTS (Optional)
@@ -341,16 +357,20 @@ The size filter is the single most important factor for profitability.
 
 ## Monitoring & Dashboard
 
-### Web Dashboard
+### Web Dashboards
 
-The bot includes both a **Flask API** (backend) and a **React dashboard** (frontend):
+The bot includes **three dashboards** for different purposes:
 
 | Interface | URL | Purpose |
 |-----------|-----|---------|
-| **React Dashboard** | `http://localhost:3000` | Modern web UI with real-time updates |
-| **Flask API** | `http://localhost:5050` | REST API for data access |
+| **Flask Dashboard** | `http://localhost:9050` | Trading metrics, starts with bot |
+| **React Dashboard** | `http://localhost:3000` | Full trading UI with real-time updates |
+| **Market Explorer** | `http://localhost:3004` | Market discovery UI (separate app) |
+| **Ingestion Dashboard** | `http://localhost:8081` | Data flow monitoring |
 
-#### Flask API Endpoints
+**Note**: The Flask Dashboard uses port 9050 by default (not 5050) to avoid conflicts.
+
+#### Flask API Endpoints (port 9050)
 
 | Endpoint | Purpose |
 |----------|---------|
@@ -371,20 +391,28 @@ npm run dev
 
 The React dashboard connects to the Flask API via Vite proxy (configured in `vite.config.ts`).
 
+#### Running the Ingestion Dashboard
+
+```bash
+python scripts/run_ingestion.py
+```
+
+This provides real-time monitoring of data ingestion from Polymarket.
+
 ### Dashboard Configuration
 
 ```bash
 # Enable/disable dashboard (default: true)
 DASHBOARD_ENABLED=true
 
-# Host binding (default: 127.0.0.1 for security)
-DASHBOARD_HOST=127.0.0.1
+# Host binding (default: 0.0.0.0 for Docker/Tailscale access)
+DASHBOARD_HOST=0.0.0.0
 
-# Port (default: 5050)
-DASHBOARD_PORT=5050
+# Port (default: 9050 - recommended to avoid conflicts)
+DASHBOARD_PORT=9050
 ```
 
-**Security Note**: The dashboard binds to `127.0.0.1` (localhost) by default. This means it's only accessible from the local machine.
+**Security Note**: When `DASHBOARD_HOST=0.0.0.0`, the dashboard is accessible from other machines. Always set `DASHBOARD_API_KEY` for security when exposed on a network.
 
 ### Dashboard Security
 
@@ -400,12 +428,12 @@ export DASHBOARD_API_KEY="your-secret-key-here"
 
 Access with header:
 ```bash
-curl -H "X-API-Key: your-secret-key" http://host:5050/api/positions
+curl -H "X-API-Key: your-secret-key" http://host:9050/api/positions
 ```
 
 Or query parameter:
 ```bash
-curl "http://host:5050/api/positions?api_key=your-secret-key"
+curl "http://host:9050/api/positions?api_key=your-secret-key"
 ```
 
 **WARNING**: Never expose the dashboard on a network without setting `DASHBOARD_API_KEY`!
@@ -449,6 +477,8 @@ In dry run mode:
 - ✅ Logs what trades WOULD execute
 - ❌ Does NOT submit real orders
 - ❌ Does NOT spend real money
+
+**Note**: Telegram alerts still fire in dry-run mode (they will say "Trade Executed" even though no real trade occurred). This is by design for testing alerts.
 
 **Always start with dry run** to verify your configuration works.
 
@@ -633,6 +663,228 @@ Log locations:
 
 ---
 
+## Production Deployment & Data Continuity
+
+This section explains how to run the bot in production and what happens to your data and trading when the bot restarts or experiences downtime.
+
+### Running Permanently with systemd
+
+For production deployment, use **systemd** to keep the bot running continuously with automatic restarts.
+
+**Installation:**
+
+```bash
+# Copy the service file
+sudo cp deploy/systemd/polymarket-bot.service /etc/systemd/system/
+
+# Reload systemd
+sudo systemctl daemon-reload
+
+# Enable on boot
+sudo systemctl enable polymarket-bot
+
+# Start the service
+sudo systemctl start polymarket-bot
+
+# Check status
+sudo systemctl status polymarket-bot
+
+# View logs
+sudo journalctl -u polymarket-bot -f
+```
+
+**What the service provides:**
+- **Automatic restart**: If the bot crashes, systemd restarts it after 10 seconds
+- **Boot persistence**: The bot starts automatically when the server boots
+- **Resource limits**: Memory capped at 2GB to prevent runaway usage
+- **Security hardening**: Runs as unprivileged user with restricted file access
+- **Graceful shutdown**: 30-second timeout for clean shutdown on stop
+
+**Service configuration (`/etc/systemd/system/polymarket-bot.service`):**
+
+```ini
+[Unit]
+Description=Polymarket Trading Bot
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=trading
+WorkingDirectory=/opt/polymarket-bot
+EnvironmentFile=/opt/polymarket-bot/.env
+ExecStart=/opt/polymarket-bot/.venv/bin/python -m polymarket_bot.main --mode all
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### What Persists vs What Is Ephemeral
+
+Understanding what data survives a restart is critical for operating the bot reliably.
+
+| Data Type | Persists? | Where Stored | Notes |
+|-----------|-----------|--------------|-------|
+| **Open Positions** | ✅ Yes | PostgreSQL `positions` table | Restored on startup |
+| **Open Orders** | ✅ Yes | PostgreSQL `orders` table | Restored with balance reservations |
+| **Balance Reservations** | ✅ Yes | Rebuilt from orders | Prevents over-allocation |
+| **Trade History** | ✅ Yes | PostgreSQL | Permanent audit trail |
+| **Exit Events** | ✅ Yes | PostgreSQL `exit_events` | Permanent audit trail |
+| **Trigger History** | ✅ Yes | PostgreSQL `polymarket_first_triggers` | Prevents duplicate triggers |
+| **Price Updates** | ❌ No | Memory only | Live WebSocket data |
+| **Watchlist Scoring** | ❌ No | Memory only | Rebuilt from fresh data |
+
+### State Recovery on Restart
+
+When the bot starts (or restarts), it automatically recovers state:
+
+```
+Startup Sequence:
+1. Connect to PostgreSQL
+2. Refresh balance from Polymarket CLOB API
+3. Load open orders from database
+   └─> Restore balance reservations for each order
+   └─> Sync order status with CLOB (detect fills while offline)
+4. Load open positions from database
+5. **Position Sync** (if WALLET_ADDRESS configured):
+   └─> Verify positions still exist on Polymarket
+   └─> Close positions from resolved markets
+   └─> Import externally created positions
+   └─> Update sizes for partial external sells
+6. Start WebSocket connection
+7. Begin processing live events
+```
+
+**The bot logs this on startup:**
+```
+INFO: Startup position sync: reconciling with Polymarket...
+INFO: Startup position sync complete: 0 imported, 1 updated, 2 closed
+INFO: Loaded state: 10 positions, 3 orders
+```
+
+### Automatic Position Sync
+
+**New in this version:** The bot now automatically reconciles positions with Polymarket on every startup. This prevents several critical bugs:
+
+| Without Position Sync | With Position Sync |
+|----------------------|-------------------|
+| Ghost positions from resolved markets | Detected and closed |
+| Externally sold positions still tracked | Detected and removed |
+| Externally created positions invisible | Imported and monitored |
+| Wrong position sizes after partial sells | Updated to actual |
+
+**Configuration:**
+
+```bash
+# Required: Your Polymarket wallet address
+WALLET_ADDRESS=0x...
+
+# Enable/disable startup sync (default: true)
+SYNC_POSITIONS_ON_STARTUP=true
+
+# How to treat newly imported positions:
+# - "new": 7-day hold period starts fresh (default, safe)
+# - "mature": Exit logic applies immediately
+# - "actual": Use actual trade timestamps (slowest)
+STARTUP_SYNC_HOLD_POLICY=new
+```
+
+**If Polymarket API is down at startup:**
+- The bot logs a warning and continues with database state
+- Background sync will eventually reconcile
+- No startup failure - trading continues with stale data
+
+### Data Ingestion: Live-Only, No Backfill
+
+**Critical to understand:** The bot operates on **live data only**. It does NOT backfill historical data.
+
+**How data ingestion works:**
+1. **WebSocket connects** to Polymarket's real-time price feed
+2. **Price updates stream in** as they happen on the exchange
+3. **Each update is evaluated** by the strategy
+4. **Trades execute** if the strategy signals BUY
+
+**What this means:**
+- The bot only sees trades that occur **while it is running**
+- If a 95¢ trade happens while the bot is offline, it will **NOT** be captured
+- There is **no way to replay** missed trading opportunities
+- The WebSocket has no "catch up" or historical data feature
+
+### What Happens During Downtime
+
+**Scenario:** Bot is offline from 2:00 AM to 2:30 AM
+
+| Event | Result |
+|-------|--------|
+| Trade at $0.96 happens at 2:15 AM | **MISSED** - Bot was offline, opportunity lost |
+| Your open position hits profit target | **NOT EXITED** - Exit monitoring was offline |
+| Order fills while bot is offline | **DETECTED** - CLOB status synced on restart |
+| Market resolves while offline | **HANDLED** - Position sync detects closed positions |
+
+**Key points:**
+- **Missed opportunities are NOT recoverable** - The Polymarket WebSocket does not provide historical data
+- **Open orders may fill** - CLOB executes orders even when bot is offline; status synced on restart
+- **Exit monitoring pauses** - Positions won't exit at targets during downtime
+- **Market resolutions are detected** - Position sync handles externally closed positions
+
+### Maximizing Uptime
+
+To minimize missed opportunities:
+
+1. **Use systemd** for automatic restart on crash
+2. **Monitor with Telegram alerts** for downtime notifications
+3. **Set up health monitoring** (external ping to `/health` endpoint)
+4. **Use a reliable server** with good network connectivity
+5. **Keep the database local** to avoid network latency/failures
+
+**Example uptime monitoring script:**
+
+```bash
+#!/bin/bash
+# Add to cron: */5 * * * * /opt/scripts/check_bot.sh
+
+if ! curl -sf http://localhost:9050/health > /dev/null; then
+    # Bot is down - alert via Telegram
+    curl -s "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
+        -d "chat_id=$CHAT_ID" \
+        -d "text=⚠️ Polymarket bot is DOWN!"
+fi
+```
+
+### Docker vs Systemd
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| **Docker** | Isolated environment, easy updates | Extra layer of complexity |
+| **systemd** | Native Linux, lower overhead | Requires system Python setup |
+| **Docker + systemd** | Best of both (Docker for app, systemd for restart) | Most complex setup |
+
+**Recommendation:** For production, use the **systemd service files** in `deploy/systemd/`. They're pre-configured with security hardening and resource limits.
+
+### Position Sync After Extended Downtime
+
+If the bot was offline for an extended period, run a position sync to reconcile:
+
+```bash
+# Dry run to see what changed
+python -m polymarket_bot.sync_positions \
+    --wallet-address 0xYourWallet \
+    --dry-run
+
+# Actually sync
+python -m polymarket_bot.sync_positions \
+    --wallet-address 0xYourWallet
+```
+
+This will:
+- Detect positions closed externally (market resolution, manual sale)
+- Import new positions created externally
+- Update position sizes that changed
+
+---
+
 ## Architecture Overview
 
 ```
@@ -703,9 +955,12 @@ DRY_RUN=true              # Paper trading mode
 PRICE_THRESHOLD=0.95      # Minimum price to trade
 POSITION_SIZE=20          # USD per trade
 MAX_POSITIONS=50          # Maximum concurrent positions
+WALLET_ADDRESS=0x...      # Your wallet (required for position sync)
+SYNC_POSITIONS_ON_STARTUP=true  # Reconcile on startup
 LOG_LEVEL=INFO            # Logging verbosity
-DASHBOARD_HOST=127.0.0.1  # Dashboard host (security)
-DASHBOARD_API_KEY=        # Dashboard auth (optional)
+DASHBOARD_HOST=0.0.0.0    # Dashboard host (0.0.0.0 for Docker/Tailscale)
+DASHBOARD_PORT=9050       # Dashboard port (9050 recommended)
+DASHBOARD_API_KEY=        # Dashboard auth (REQUIRED if exposed)
 ```
 
 ### Test Commands
@@ -722,8 +977,9 @@ pytest --cov=src/polymarket_bot           # With coverage
 | URL | Purpose |
 |-----|---------|
 | `http://localhost:3000` | React dashboard (dev) |
-| `http://localhost:5050/health` | Flask API health |
-| `http://localhost:5050/api/positions` | Open positions |
+| `http://localhost:9050/health` | Flask API health |
+| `http://localhost:9050/api/positions` | Open positions |
+| `http://localhost:8081` | Ingestion dashboard |
 | `https://polymarket.com` | Polymarket website |
 | `https://clob.polymarket.com` | CLOB API |
 

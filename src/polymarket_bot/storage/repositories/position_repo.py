@@ -131,6 +131,8 @@ class PositionRepository(BaseRepository[Position]):
                 realized_pnl = COALESCE($4, (size * $2) - entry_cost),
                 unrealized_pnl = 0,
                 exit_order_id = $3,
+                exit_status = CASE WHEN $3 IS NULL THEN NULL ELSE 'filled' END,
+                exit_pending = FALSE,
                 exit_timestamp = $5,
                 updated_at = $5
             WHERE id = $1
@@ -156,6 +158,9 @@ class PositionRepository(BaseRepository[Position]):
                 current_value = $3,
                 realized_pnl = $3 - entry_cost,
                 unrealized_pnl = 0,
+                exit_pending = FALSE,
+                exit_order_id = NULL,
+                exit_status = 'resolved',
                 resolved_at = $4,
                 updated_at = $4
             WHERE id = $1

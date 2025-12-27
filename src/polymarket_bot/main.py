@@ -56,6 +56,7 @@ import logging
 import os
 import signal
 import sys
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -111,6 +112,15 @@ class BotConfig:
     telegram_bot_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
 
+    # Position sync configuration
+    sync_positions_on_startup: bool = True
+    startup_sync_hold_policy: str = "new"  # "new", "mature", or "actual"
+
+    # Background position sync (detects external trades)
+    position_sync_enabled: bool = True
+    position_sync_interval_seconds: float = 120  # Quick sync every 2 minutes
+    full_position_sync_interval_seconds: float = 900  # Full sync every 15 minutes
+
     # Polymarket credentials
     clob_credentials: dict = field(default_factory=dict)
 
@@ -136,6 +146,11 @@ class BotConfig:
             dashboard_port=int(os.environ.get("DASHBOARD_PORT", "9050")),
             telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN"),
             telegram_chat_id=os.environ.get("TELEGRAM_CHAT_ID"),
+            sync_positions_on_startup=os.environ.get("SYNC_POSITIONS_ON_STARTUP", "true").lower() == "true",
+            startup_sync_hold_policy=os.environ.get("STARTUP_SYNC_HOLD_POLICY", "new"),
+            position_sync_enabled=os.environ.get("POSITION_SYNC_ENABLED", "true").lower() == "true",
+            position_sync_interval_seconds=float(os.environ.get("POSITION_SYNC_INTERVAL_SECONDS", "120")),
+            full_position_sync_interval_seconds=float(os.environ.get("FULL_POSITION_SYNC_INTERVAL_SECONDS", "900")),
         )
 
         # Load CLOB credentials
@@ -166,6 +181,7 @@ class TradingBot:
         self.config = config
         self._running = False
         self._shutdown_event = asyncio.Event()
+        self._started_at = None
 
         # Components (initialized on start)
         self._db = None
@@ -199,6 +215,7 @@ class TradingBot:
         logger.info("=" * 60)
 
         self._running = True
+        self._started_at = datetime.now(timezone.utc)
         self._shutdown_event.clear()
 
         # Setup signal handlers FIRST to catch early signals
@@ -310,6 +327,14 @@ class TradingBot:
                 logger.warning(f"Error closing database: {e}")
 
         logger.info("Shutdown complete")
+
+    async def request_shutdown(self, reason: str = "manual") -> None:
+        """Request a graceful shutdown from another thread."""
+        if not self._running:
+            return
+        logger.warning(f"Shutdown requested: {reason}")
+        self._running = False
+        self._shutdown_event.set()
 
     async def _init_database(self) -> None:
         """Initialize database connection."""
@@ -450,14 +475,22 @@ class TradingBot:
             else:
                 logger.warning("G12: No 'funder' in credentials, position sync disabled")
 
+        # max_price allows for G5-approved deviation above trigger threshold
+        # If we trigger at 0.95 and allow 0.10 deviation, max_price should be min(1.05, 1.0) = 1.0
+        max_price = min(
+            self.config.price_threshold + self.config.max_price_deviation,
+            Decimal("1.0"),
+        )
         exec_config = ExecutionConfig(
-            max_price=self.config.price_threshold,
+            max_price=max_price,
             default_position_size=self.config.position_size,
             min_balance_reserve=self.config.min_balance_reserve,
             profit_target=self.config.profit_target,
             stop_loss=self.config.stop_loss,
             min_hold_days=self.config.min_hold_days,
             wallet_address=wallet_address,
+            sync_positions_on_startup=self.config.sync_positions_on_startup,
+            startup_sync_hold_policy=self.config.startup_sync_hold_policy,
         )
 
         self._execution_service = ExecutionService(
@@ -537,7 +570,16 @@ class TradingBot:
                     health_checker=self._health_checker,
                     metrics_collector=self._metrics_collector,
                     event_loop=event_loop,
+                    engine=self._engine,
+                    execution_service=self._execution_service,
+                    bot_config=self.config,
+                    shutdown_callback=self.request_shutdown,
+                    started_at=self._started_at,
                 )
+                await self._dashboard.ensure_control_tables()
+                await self._dashboard.load_blocklist()
+                if self._execution_service:
+                    self._execution_service.set_event_sink(self._dashboard.broadcast_event)
                 self._start_dashboard()
             except ImportError as e:
                 logger.warning(f"Dashboard disabled: {e}")
@@ -614,6 +656,7 @@ class TradingBot:
     async def _init_background_tasks(self) -> None:
         """Initialize background task manager."""
         from polymarket_bot.core import BackgroundTasksManager, BackgroundTaskConfig
+        from polymarket_bot.execution.position_sync import PositionSyncService
 
         config = BackgroundTaskConfig(
             watchlist_rescore_interval_seconds=self.config.watchlist_rescore_interval_hours * 3600,
@@ -622,6 +665,11 @@ class TradingBot:
             order_sync_enabled=not self.config.dry_run,  # Only sync in live mode
             exit_eval_interval_seconds=60,
             exit_eval_enabled=not self.config.dry_run,  # Only eval exits in live mode
+            # Position sync from Polymarket (detects external trades)
+            position_sync_enabled=self.config.position_sync_enabled,
+            position_sync_interval_seconds=self.config.position_sync_interval_seconds,
+            full_position_sync_interval_seconds=self.config.full_position_sync_interval_seconds,
+            full_position_sync_enabled=self.config.position_sync_enabled,
         )
 
         # Create price fetcher using ingestion layer if available
@@ -629,11 +677,39 @@ class TradingBot:
         if self._ingestion and hasattr(self._ingestion, 'rest_client'):
             price_fetcher = self._create_price_fetcher()
 
+        # Create PositionSyncService for external trade detection
+        position_sync_service = None
+        wallet_address = None
+        if self.config.position_sync_enabled and self.config.clob_credentials:
+            wallet_address = self.config.clob_credentials.get("funder")
+            if wallet_address:
+                # Get position tracker from execution service
+                position_tracker = None
+                if self._execution_service:
+                    position_tracker = self._execution_service._position_tracker
+
+                position_sync_service = PositionSyncService(
+                    db=self._db,
+                    position_tracker=position_tracker,
+                )
+                logger.info(
+                    f"Position sync: Enabled for wallet {wallet_address[:10]}... "
+                    f"(quick={config.position_sync_interval_seconds}s, "
+                    f"full={config.full_position_sync_interval_seconds}s)"
+                )
+            else:
+                logger.warning(
+                    "Position sync: No 'funder' in credentials. "
+                    "External trades will not be detected."
+                )
+
         self._background_tasks = BackgroundTasksManager(
             engine=self._engine,
             execution_service=self._execution_service,
             config=config,
             price_fetcher=price_fetcher,
+            position_sync_service=position_sync_service,
+            wallet_address=wallet_address,
         )
 
         await self._background_tasks.start()
@@ -735,6 +811,23 @@ class TradingBot:
             }
 
             signal = await self._engine.process_event(event)
+
+            if self._dashboard:
+                self._dashboard.broadcast_event({
+                    "type": "price",
+                    "token_id": update.token_id,
+                    "condition_id": getattr(update, "condition_id", ""),
+                    "price": str(update.price),
+                })
+
+                if signal:
+                    self._dashboard.broadcast_event({
+                        "type": "signal",
+                        "signal_type": signal.type.value,
+                        "token_id": getattr(signal, "token_id", None),
+                        "position_id": getattr(signal, "position_id", None),
+                        "reason": getattr(signal, "reason", None),
+                    })
 
             # Alert on significant signals
             if signal and self._alert_manager:

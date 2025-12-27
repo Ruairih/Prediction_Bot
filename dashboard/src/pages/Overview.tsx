@@ -1,15 +1,17 @@
 /**
  * Overview Page - Mission Control
  *
- * Main dashboard with KPIs, bot status, activity stream, and charts.
- * Fetches real data from the Flask monitoring API.
+ * Primary operator surface with KPIs, activity, and system pulse.
  */
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
+import { formatDistanceToNowStrict } from 'date-fns';
 import { KpiTile } from '../components/overview/KpiTile';
 import { BotStatus } from '../components/overview/BotStatus';
 import { ActivityStream } from '../components/overview/ActivityStream';
-import { useBotStatus, useMetrics, useTriggers } from '../hooks/useDashboardData';
-import type { BotStatus as BotStatusType, DashboardMetrics, ActivityEvent } from '../types';
+import { EquityCurveChart } from '../components/performance/EquityCurveChart';
+import { useBotStatus, useMetrics, useActivity, usePositions, usePerformance } from '../hooks/useDashboardData';
+import { pauseTrading, resumeTrading, killTrading } from '../api/dashboard';
+import type { BotStatus as BotStatusType, DashboardMetrics, ActivityEvent, Position } from '../types';
 
 // Fallback values when API is unavailable
 const fallbackStatus: BotStatusType = {
@@ -39,48 +41,72 @@ export function Overview() {
   // Fetch real data from API
   const { data: statusData, isLoading: statusLoading, error: statusError } = useBotStatus();
   const { data: metricsData, isLoading: metricsLoading, error: metricsError } = useMetrics();
-  const { data: activityData, isLoading: activityLoading } = useTriggers(20);
+  const { data: activityData, isLoading: activityLoading } = useActivity(20);
+  const { data: positionsData } = usePositions();
+  const { data: performanceData } = usePerformance(30);
 
   // Use API data or fallbacks
   const status = statusData ?? fallbackStatus;
   const metrics = metricsData ?? fallbackMetrics;
   const activity = activityData ?? [];
+  const positions = positionsData ?? [];
 
   const [selectedEvent, setSelectedEvent] = useState<ActivityEvent | null>(null);
 
-  const handlePause = () => {
-    console.log('Pause clicked');
-    // TODO: Implement pause API call
+  const handlePause = async () => {
+    if (status.mode === 'paused') {
+      await resumeTrading();
+      return;
+    }
+    await pauseTrading('mission_control');
   };
 
-  const handleStop = () => {
-    console.log('Stop clicked');
-    // TODO: Implement stop API call
+  const handleStop = async () => {
+    if (!window.confirm('Stop the bot now?')) {
+      return;
+    }
+    await killTrading('mission_control');
   };
 
   const pnlTrend = metrics.totalPnl >= 0 ? 'up' : 'down';
   const todayTrend = metrics.todayPnl >= 0 ? 'up' : 'down';
+
+  const totalAssets = metrics.availableBalance + metrics.capitalDeployed;
+  const exposurePercent = totalAssets > 0 ? (metrics.capitalDeployed / totalAssets) * 100 : 0;
+
+  const topPositions = useMemo(() => {
+    const sortable = [...positions];
+    sortable.sort((a, b) => b.pnlPercent - a.pnlPercent);
+    return sortable.slice(0, 4);
+  }, [positions]);
 
   // Show connection status
   const isConnected = !statusError && !metricsError;
   const isLoading = statusLoading || metricsLoading;
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="px-6 py-6 space-y-6">
       {/* Page Title */}
-      <div className="flex justify-between items-start">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-text-primary">Overview</h1>
-          <p className="text-text-secondary">Mission control for your trading bot</p>
+          <div className="text-[11px] uppercase tracking-[0.3em] text-text-secondary/70">
+            Mission Control
+          </div>
+          <h1 className="text-3xl font-semibold text-text-primary">
+            Trading Command Desk
+          </h1>
+          <p className="text-text-secondary">
+            Real-time pulse on positions, signals, and system health.
+          </p>
         </div>
 
         {/* Connection Status */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3 rounded-full border border-border bg-bg-secondary px-4 py-2 text-sm shadow-sm">
           {isLoading && (
-            <span className="text-text-secondary text-sm">Loading...</span>
+            <span className="text-text-secondary text-xs">Syncing data...</span>
           )}
-          <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`} />
-          <span className="text-text-secondary text-sm">
+          <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-accent-green' : 'bg-accent-red'}`} />
+          <span className="text-text-secondary">
             {isConnected ? 'Connected' : 'Disconnected'}
           </span>
         </div>
@@ -88,18 +114,18 @@ export function Overview() {
 
       {/* Error Banner */}
       {(statusError || metricsError) && (
-        <div className="bg-red-900/20 border border-red-500/50 rounded-lg p-4">
-          <p className="text-red-400">
-            Unable to connect to monitoring API. Make sure the bot is running on port 5050.
+        <div className="bg-accent-red/10 border border-accent-red/30 rounded-2xl p-4">
+          <p className="text-accent-red">
+            Unable to connect to monitoring API. Make sure the bot is running on port 9050.
           </p>
-          <p className="text-red-400/70 text-sm mt-1">
-            Run: <code className="bg-red-900/30 px-1 rounded">python -m polymarket_bot.main --mode all</code>
+          <p className="text-accent-red/70 text-sm mt-1">
+            Run: <code className="bg-bg-tertiary px-1 rounded">python -m polymarket_bot.main --mode all</code>
           </p>
         </div>
       )}
 
       {/* KPI Tiles */}
-      <div data-testid="kpi-container" className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div data-testid="kpi-container" className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
         <KpiTile
           testId="kpi-total-pnl"
           label="Total P&L"
@@ -126,58 +152,139 @@ export function Overview() {
           value={String(metrics.openPositions)}
           change={`$${metrics.capitalDeployed.toFixed(2)} deployed`}
         />
+        <KpiTile
+          testId="kpi-balance"
+          label="Available"
+          value={`$${metrics.availableBalance.toFixed(2)}`}
+          change="Reserve balance"
+        />
+        <KpiTile
+          testId="kpi-exposure"
+          label="Exposure"
+          value={`${exposurePercent.toFixed(1)}%`}
+          change={`$${metrics.capitalDeployed.toFixed(2)}`}
+        />
       </div>
 
       {/* Main Content Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Activity Stream - Takes 2 columns on large screens */}
-        <div className="lg:col-span-2">
+        <div className="lg:col-span-2 space-y-6">
           <ActivityStream
             events={activity}
             maxEvents={10}
             onEventClick={setSelectedEvent}
             isLoading={activityLoading}
           />
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="bg-bg-secondary rounded-2xl p-4 border border-border shadow-sm">
+              <div className="text-[11px] uppercase tracking-[0.3em] text-text-secondary/70">
+                Exposure
+              </div>
+              <h3 className="text-lg font-semibold text-text-primary mb-3">
+                Risk Snapshot
+              </h3>
+              <div className="flex items-center justify-between text-sm text-text-secondary">
+                <span>Deployed</span>
+                <span className="text-text-primary">
+                  ${metrics.capitalDeployed.toFixed(2)}
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-sm text-text-secondary mt-2">
+                <span>Reserve</span>
+                <span className="text-text-primary">
+                  ${metrics.availableBalance.toFixed(2)}
+                </span>
+              </div>
+              <div className="mt-4">
+                <div className="h-2 rounded-full bg-bg-tertiary">
+                  <div
+                    className="h-full rounded-full bg-accent-blue"
+                    style={{ width: `${Math.min(exposurePercent, 100)}%` }}
+                  />
+                </div>
+                <div className="flex justify-between text-xs text-text-secondary mt-2">
+                  <span>0%</span>
+                  <span>{exposurePercent.toFixed(1)}%</span>
+                  <span>100%</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-bg-secondary rounded-2xl p-4 border border-border shadow-sm">
+              <div className="text-[11px] uppercase tracking-[0.3em] text-text-secondary/70">
+                Positions
+              </div>
+              <h3 className="text-lg font-semibold text-text-primary mb-3">
+                Highlights
+              </h3>
+              {topPositions.length === 0 ? (
+                <div className="text-text-secondary text-sm">No open positions yet.</div>
+              ) : (
+                <div className="space-y-3">
+                  {topPositions.map((position: Position) => (
+                    <div key={position.positionId} className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-sm text-text-primary truncate">
+                          {position.question}
+                        </div>
+                        <div className="text-xs text-text-secondary">
+                          Opened {formatDistanceToNowStrict(new Date(position.entryTime))} ago
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className={position.unrealizedPnl >= 0 ? 'text-accent-green' : 'text-accent-red'}>
+                          {position.unrealizedPnl >= 0 ? '+' : '-'}${Math.abs(position.unrealizedPnl).toFixed(2)}
+                        </div>
+                        <div className="text-xs text-text-secondary">
+                          {position.pnlPercent.toFixed(1)}%
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
         </div>
 
         {/* Bot Status */}
-        <div>
+        <div className="space-y-6">
           <BotStatus
             status={status}
             onPause={handlePause}
             onStop={handleStop}
           />
+
+          <div className="bg-bg-secondary rounded-2xl p-4 border border-border shadow-sm">
+            <div className="text-[11px] uppercase tracking-[0.3em] text-text-secondary/70">
+              Signals
+            </div>
+            <h3 className="text-lg font-semibold text-text-primary mb-3">
+              Decision Pulse
+            </h3>
+            <div className="space-y-2 text-sm text-text-secondary">
+              <div className="flex items-center justify-between">
+                <span>Win rate</span>
+                <span className="text-text-primary">{(metrics.winRate * 100).toFixed(1)}%</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>Triggers evaluated</span>
+                <span className="text-text-primary">{metrics.totalTrades}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>Live mode</span>
+                <span className="text-text-primary">{status.mode}</span>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
-      {/* Equity Curve Placeholder */}
-      <div
-        data-testid="equity-curve"
-        className="bg-bg-secondary rounded-lg p-4 border border-border"
-      >
-        <h3 className="text-lg font-semibold mb-4 text-text-primary">
-          Equity Curve (Last 30 Days)
-        </h3>
-        <div className="h-64 flex items-center justify-center text-text-secondary">
-          {/* TODO: Replace with Recharts implementation using real daily_pnl data */}
-          <svg viewBox="0 0 400 200" className="w-full h-full">
-            <polyline
-              fill="none"
-              stroke={metrics.totalPnl >= 0 ? '#3fb950' : '#f85149'}
-              strokeWidth="2"
-              points="0,180 50,170 100,160 150,150 200,140 250,120 300,100 350,80 400,60"
-            />
-            <text x="10" y="20" fill="#8b949e" fontSize="12">
-              ${(metrics.availableBalance + metrics.capitalDeployed).toFixed(0)}
-            </text>
-            <text x="10" y="100" fill="#8b949e" fontSize="12">
-              ${((metrics.availableBalance + metrics.capitalDeployed) * 0.9).toFixed(0)}
-            </text>
-            <text x="10" y="180" fill="#8b949e" fontSize="12">
-              ${((metrics.availableBalance + metrics.capitalDeployed) * 0.8).toFixed(0)}
-            </text>
-          </svg>
-        </div>
+      {/* Equity Curve */}
+      <div data-testid="equity-curve" className="rounded-2xl">
+        <EquityCurveChart data={performanceData?.equity ?? []} />
       </div>
 
       {/* Activity Details Modal */}
@@ -192,7 +299,7 @@ export function Overview() {
           onKeyDown={(e) => e.key === 'Escape' && setSelectedEvent(null)}
         >
           <div
-            className="bg-bg-secondary rounded-lg p-6 max-w-lg w-full mx-4 border border-border"
+            className="bg-bg-secondary rounded-2xl p-6 max-w-lg w-full mx-4 border border-border shadow-lg"
             onClick={(e) => e.stopPropagation()}
           >
             <h3 id="modal-title" className="text-lg font-semibold text-text-primary mb-4">

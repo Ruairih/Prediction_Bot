@@ -9,7 +9,7 @@ import { ActivityList } from '../components/activity/ActivityList';
 import { ActivityStats } from '../components/activity/ActivityStats';
 import { Pagination } from '../components/common/Pagination';
 import { EmptyState } from '../components/common/EmptyState';
-import { useTriggers } from '../hooks/useDashboardData';
+import { useActivity } from '../hooks/useDashboardData';
 import type { ActivityEvent, ActivityFilterState, ActivityStats as ActivityStatsType } from '../types';
 
 const PAGE_SIZE = 20;
@@ -28,7 +28,7 @@ export function Activity() {
   const rawPage = parseInt(searchParams.get('page') || '1', 10);
 
   // Fetch real data from API (get more events for better filtering)
-  const { data: eventsData, isLoading, error } = useTriggers(100);
+  const { data: eventsData, isLoading, error } = useActivity(200);
   const events: ActivityEvent[] = eventsData ?? [];
   const [selectedEvent, setSelectedEvent] = useState<ActivityEvent | null>(null);
 
@@ -132,7 +132,7 @@ export function Activity() {
       {error && (
         <div className="bg-red-900/20 border border-red-500/50 rounded-lg p-4">
           <p className="text-red-400">
-            Unable to load activity data. Make sure the bot is running on port 5050.
+            Unable to load activity data. Make sure the bot is running on port 9050.
           </p>
         </div>
       )}

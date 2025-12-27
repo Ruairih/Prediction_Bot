@@ -43,6 +43,9 @@ class Position:
     entry_timestamp: Optional[str] = None
     realized_pnl: Decimal = Decimal("0")
     status: str = "open"  # open, closed
+    exit_order_id: Optional[str] = None
+    exit_status: Optional[str] = None
+    exit_pending: bool = False
     # For imported positions, hold_start_at may differ from entry_time
     # Exit logic uses hold_start_at to determine if 7-day hold has passed
     hold_start_at: Optional[datetime] = None
@@ -447,6 +450,9 @@ class PositionTracker:
         position.status = "closed"
         position.realized_pnl += pnl
         position.size = Decimal("0")
+        position.exit_pending = False
+        position.exit_order_id = exit_order_id
+        position.exit_status = "filled" if exit_order_id else None
 
         # Clear token position mapping so new BUYs create fresh positions
         if position.token_id in self._token_positions:
@@ -455,7 +461,6 @@ class PositionTracker:
         await self._save_position(
             position,
             exit_timestamp=now,
-            exit_order_id=exit_order_id,
         )
         await self._save_exit_event(exit_event)
 
@@ -482,7 +487,7 @@ class PositionTracker:
         query = """
             SELECT id::text AS position_id, token_id, condition_id, size, entry_price,
                    entry_cost, entry_timestamp AS entry_time, realized_pnl, status,
-                   hold_start_at, import_source, age_source
+                   exit_order_id, exit_pending, exit_status, hold_start_at, import_source, age_source
             FROM positions
             WHERE status = 'open'
         """
@@ -519,6 +524,10 @@ class PositionTracker:
             # age_source determines if exit logic trusts the timestamp
             # Default to "unknown" (eligible for exit) if not set
             age_source = r.get("age_source") or "unknown"
+            exit_pending = r.get("exit_pending")
+            exit_status = r.get("exit_status")
+            if exit_status is None and exit_pending:
+                exit_status = "pending"
 
             position = Position(
                 position_id=r["position_id"],
@@ -531,6 +540,9 @@ class PositionTracker:
                 entry_timestamp=entry_timestamp,
                 realized_pnl=Decimal(str(r.get("realized_pnl", 0))),
                 status=r["status"],
+                exit_order_id=r.get("exit_order_id"),
+                exit_status=exit_status,
+                exit_pending=bool(exit_pending) if exit_pending is not None else False,
                 hold_start_at=hold_start_at,
                 import_source=r.get("import_source"),
                 age_source=age_source,
@@ -545,7 +557,6 @@ class PositionTracker:
         position: Position,
         *,
         exit_timestamp: Optional[datetime] = None,
-        exit_order_id: Optional[str] = None,
     ) -> None:
         """Persist position to database.
 
@@ -567,18 +578,20 @@ class PositionTracker:
         query = """
             INSERT INTO positions
             (token_id, condition_id, size, entry_price, entry_cost,
-             entry_timestamp, realized_pnl, status, exit_order_id, exit_timestamp,
-             created_at, updated_at, import_source, age_source, hold_start_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+             entry_timestamp, realized_pnl, status, exit_order_id, exit_pending,
+             exit_status, exit_timestamp, created_at, updated_at, import_source, age_source, hold_start_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             ON CONFLICT (token_id, entry_timestamp) DO UPDATE
             SET size = $3,
                 entry_price = $4,
                 entry_cost = $5,
                 realized_pnl = $7,
                 status = $8,
-                exit_order_id = COALESCE($9, positions.exit_order_id),
-                exit_timestamp = COALESCE($10, positions.exit_timestamp),
-                updated_at = $12
+                exit_order_id = $9,
+                exit_pending = $10,
+                exit_status = $11,
+                exit_timestamp = COALESCE($12, positions.exit_timestamp),
+                updated_at = $14
         """
         await self._db.execute(
             query,
@@ -590,7 +603,9 @@ class PositionTracker:
             entry_timestamp,
             float(position.realized_pnl),
             position.status,
-            exit_order_id,
+            position.exit_order_id,
+            position.exit_pending,
+            position.exit_status,
             exit_timestamp_str,
             entry_timestamp,  # created_at
             now_str,
@@ -598,6 +613,103 @@ class PositionTracker:
             age_source,
             hold_start_str,
         )
+
+    async def mark_exit_pending(self, position_id: str, exit_order_id: str) -> bool:
+        """Mark a position as having a pending exit order."""
+        position = self.positions.get(position_id)
+        if not position:
+            return False
+        position.exit_pending = True
+        position.exit_order_id = exit_order_id
+        position.exit_status = "pending"
+        await self._save_position(position)
+        return True
+
+    async def clear_exit_pending(
+        self,
+        position_id: str,
+        *,
+        clear_order_id: bool = True,
+        exit_status: Optional[str] = None,
+    ) -> bool:
+        """Clear pending exit state for a position."""
+        position = self.positions.get(position_id)
+        if not position:
+            return False
+        position.exit_pending = False
+        position.exit_status = exit_status
+        if clear_order_id:
+            position.exit_order_id = None
+        await self._save_position(position)
+        return True
+
+    async def set_exit_status(self, position_id: str, exit_status: Optional[str]) -> bool:
+        """Update exit status for a position without changing pending state."""
+        position = self.positions.get(position_id)
+        if not position:
+            return False
+        position.exit_status = exit_status
+        if exit_status in ("pending", "timeout"):
+            position.exit_pending = True
+        await self._save_position(position)
+        return True
+
+    async def try_claim_exit_atomic(self, position_id: str) -> bool:
+        """
+        Atomically claim the exit slot for a position.
+
+        Uses database-level atomicity to prevent race conditions where two
+        concurrent exit attempts both pass the _has_pending_exit check and
+        submit duplicate orders.
+
+        This method:
+        1. Attempts an atomic UPDATE with WHERE exit_pending = FALSE
+        2. Only succeeds if no other process has claimed the slot
+        3. Updates local cache on success
+
+        Args:
+            position_id: Position ID to claim exit for
+
+        Returns:
+            True if successfully claimed (this caller should proceed with exit)
+            False if already claimed by another process (this caller should skip)
+        """
+        position = self.positions.get(position_id)
+        if not position:
+            logger.warning(f"try_claim_exit_atomic: position {position_id} not found")
+            return False
+
+        # Already marked pending in local cache - skip
+        if position.exit_pending:
+            return False
+
+        # Atomic update: only succeeds if exit_pending is currently FALSE (or NULL)
+        # This prevents TOCTOU race conditions at the database level
+        # Uses COALESCE to handle NULL exit_pending values from legacy data
+        query = """
+            UPDATE positions
+            SET exit_pending = TRUE,
+                exit_status = 'claiming',
+                updated_at = $2
+            WHERE token_id = $1
+              AND COALESCE(exit_pending, FALSE) = FALSE
+              AND status = 'open'
+            RETURNING id
+        """
+        now_str = _format_timestamp(datetime.now(timezone.utc))
+
+        result = await self._db.fetchval(query, position.token_id, now_str)
+
+        if result is not None:
+            # Successfully claimed - update local cache
+            position.exit_pending = True
+            position.exit_status = "claiming"
+            logger.debug(f"Atomically claimed exit for {position_id}")
+            return True
+        else:
+            # Another process already claimed or position state changed
+            logger.debug(f"Exit claim failed for {position_id} - already claimed or invalid state")
+            return False
 
     async def _save_exit_event(self, event: ExitEvent) -> None:
         """Persist exit event to database."""

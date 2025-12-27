@@ -7,18 +7,18 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Dark trading theme
-        'bg-primary': '#0d1117',
-        'bg-secondary': '#161b22',
-        'bg-tertiary': '#21262d',
-        'border': '#30363d',
-        'text-primary': '#e6edf3',
-        'text-secondary': '#8b949e',
-        'accent-blue': '#58a6ff',
-        'accent-green': '#3fb950',
-        'accent-red': '#f85149',
-        'accent-yellow': '#d29922',
-        'accent-purple': '#a371f7',
+        // Warm, daylight trading theme
+        'bg-primary': '#f5f1ea',
+        'bg-secondary': '#ffffff',
+        'bg-tertiary': '#efe7db',
+        'border': '#e5dccf',
+        'text-primary': '#1b1b1b',
+        'text-secondary': '#5b5b5b',
+        'accent-blue': '#0f6b6e',
+        'accent-green': '#1e7a5a',
+        'accent-red': '#b13a2d',
+        'accent-yellow': '#c2932b',
+        'accent-purple': '#5e596d',
       },
     },
   },

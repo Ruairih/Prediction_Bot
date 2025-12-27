@@ -150,6 +150,8 @@ CREATE TABLE IF NOT EXISTS positions (
     resolution TEXT,
     entry_order_id TEXT,
     exit_order_id TEXT,
+    exit_pending BOOLEAN DEFAULT FALSE,
+    exit_status TEXT,
     entry_timestamp TEXT NOT NULL,
     exit_timestamp TEXT,
     resolved_at TEXT,
@@ -267,3 +269,22 @@ CREATE INDEX IF NOT EXISTS idx_exit_events_position ON exit_events(position_id);
 CREATE INDEX IF NOT EXISTS idx_exit_events_status ON exit_events(status);
 CREATE INDEX IF NOT EXISTS idx_score_history_token ON score_history(token_id);
 CREATE INDEX IF NOT EXISTS idx_watchlist_status ON trade_watchlist(status);
+
+-- Dashboard control/audit tables
+CREATE TABLE IF NOT EXISTS dashboard_actions (
+    id SERIAL PRIMARY KEY,
+    action_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    details TEXT,
+    actor TEXT,
+    reason TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS market_blocks (
+    condition_id TEXT PRIMARY KEY,
+    token_id TEXT,
+    reason TEXT,
+    actor TEXT,
+    created_at TEXT NOT NULL
+);

@@ -35,7 +35,9 @@ def mock_db():
     db.execute = AsyncMock(return_value="UPDATE 1")
     db.fetch = AsyncMock(return_value=[])
     db.fetchrow = AsyncMock(return_value=None)
-    db.fetchval = AsyncMock(return_value=None)
+    # Default to successful atomic claim (return row ID)
+    # Individual tests can override this for failure scenarios
+    db.fetchval = AsyncMock(return_value=1)
     return db
 
 

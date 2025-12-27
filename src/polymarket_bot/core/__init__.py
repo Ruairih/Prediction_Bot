@@ -42,6 +42,9 @@ from .watchlist_service import WatchlistService, WatchlistEntry, Promotion
 # Background tasks
 from .background_tasks import BackgroundTasksManager, BackgroundTaskConfig
 
+# Pipeline visibility
+from .pipeline_tracker import PipelineTracker, RejectionStage, RejectionEvent, CandidateMarket
+
 __all__ = [
     # Main engine
     "TradingEngine",
@@ -60,4 +63,9 @@ __all__ = [
     # Background tasks
     "BackgroundTasksManager",
     "BackgroundTaskConfig",
+    # Pipeline visibility
+    "PipelineTracker",
+    "RejectionStage",
+    "RejectionEvent",
+    "CandidateMarket",
 ]

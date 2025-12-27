@@ -594,3 +594,344 @@ class TestOrderFillConfirmation:
 
         # Balance should have been refreshed (G4 protection)
         manager._balance_manager.refresh_balance.assert_called()
+
+
+class TestAtomicExitClaiming:
+    """
+    Tests for atomic exit order claiming to prevent duplicates.
+
+    CRITICAL FIX: Without atomic claiming, two concurrent execute_exit
+    calls could both pass _has_pending_exit and submit duplicate orders.
+    """
+
+    @pytest.mark.asyncio
+    async def test_atomic_claim_succeeds_for_first_caller(
+        self, mock_db, mock_clob_client, position_tracker
+    ):
+        """First caller should successfully claim exit slot."""
+        # Mock DB to return row ID on successful claim
+        mock_db.fetchval.return_value = 1  # Simulates successful UPDATE RETURNING
+
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+        )
+
+        position = Position(
+            position_id="pos_atomic",
+            token_id="tok_atomic",
+            condition_id="0xatomic",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+        position_tracker.positions[position.position_id] = position
+
+        # First claim should succeed
+        result = await manager.execute_exit(
+            position,
+            current_price=Decimal("0.99"),
+            reason="profit_target",
+        )
+
+        assert result is True
+        # Verify atomic claim was attempted
+        mock_db.fetchval.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_pending_exit_blocks_new_exit(
+        self, mock_db, mock_clob_client, position_tracker
+    ):
+        """
+        If position has pending exit, new exit should be blocked.
+
+        This tests the existing _has_pending_exit check.
+        """
+        # Mock order status to return LIVE (still pending, not filled)
+        mock_clob_client.get_order.return_value = {
+            "orderID": "order_existing",
+            "status": "LIVE",
+            "filledSize": "0",
+            "size": "20",
+        }
+
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+        )
+
+        position = Position(
+            position_id="pos_pending",
+            token_id="tok_pending",
+            condition_id="0xpending",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+            # Already has pending exit
+            exit_pending=True,
+            exit_order_id="order_existing",
+            exit_status="pending",
+        )
+        position_tracker.positions[position.position_id] = position
+
+        result = await manager.execute_exit(
+            position,
+            current_price=Decimal("0.99"),
+            reason="profit_target",
+        )
+
+        # Should return False - pending exit blocks new order
+        assert result is False
+
+        # Should NOT have submitted a new order
+        mock_clob_client.create_and_post_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cleared_pending_allows_retry(
+        self, mock_db, mock_clob_client, position_tracker
+    ):
+        """
+        After pending is cleared, new exit attempt should succeed.
+        """
+        # Mock DB to return row ID on successful claim
+        mock_db.fetchval.return_value = 1
+
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+        )
+
+        position = Position(
+            position_id="pos_retry",
+            token_id="tok_retry",
+            condition_id="0xretry",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+            # Previously had pending that was cleared
+            exit_pending=False,
+            exit_status="cancelled",
+            exit_order_id=None,
+        )
+        position_tracker.positions[position.position_id] = position
+
+        result = await manager.execute_exit(
+            position,
+            current_price=Decimal("0.99"),
+            reason="profit_target",
+        )
+
+        # Should succeed - pending was cleared
+        assert result is True
+        mock_clob_client.create_and_post_order.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_failed_order_clears_pending_state(
+        self, mock_db, mock_clob_client, position_tracker
+    ):
+        """
+        If order submission fails, pending state should be cleared.
+
+        This allows retry on next evaluation cycle.
+        """
+        # Mock DB to allow claim to succeed
+        mock_db.fetchval.return_value = 1
+
+        # Mock order submission returning no order_id
+        mock_clob_client.create_and_post_order.return_value = {}
+
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+        )
+
+        position = Position(
+            position_id="pos_fail",
+            token_id="tok_fail",
+            condition_id="0xfail",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+        position_tracker.positions[position.position_id] = position
+
+        result = await manager.execute_exit(
+            position,
+            current_price=Decimal("0.99"),
+            reason="profit_target",
+        )
+
+        # Should fail due to no order_id
+        assert result is False
+
+        # Pending should be cleared to allow retry
+        pos = position_tracker.get_position(position.position_id)
+        assert pos.exit_pending is False
+        assert pos.exit_status == "failed"
+
+    @pytest.mark.asyncio
+    async def test_exception_clears_pending_state(
+        self, mock_db, mock_clob_client, position_tracker
+    ):
+        """
+        If execution raises exception, pending state should be cleared.
+        """
+        # Mock DB to allow claim to succeed
+        mock_db.fetchval.return_value = 1
+
+        # Mock order submission raising exception
+        mock_clob_client.create_and_post_order.side_effect = Exception("API error")
+
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+        )
+
+        position = Position(
+            position_id="pos_exc",
+            token_id="tok_exc",
+            condition_id="0xexc",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+        position_tracker.positions[position.position_id] = position
+
+        result = await manager.execute_exit(
+            position,
+            current_price=Decimal("0.99"),
+            reason="profit_target",
+        )
+
+        # Should fail due to exception
+        assert result is False
+
+        # Pending should be cleared to allow retry
+        pos = position_tracker.get_position(position.position_id)
+        assert pos.exit_pending is False
+
+    @pytest.mark.asyncio
+    async def test_has_pending_exit_checks_status(
+        self, mock_db, mock_clob_client, position_tracker
+    ):
+        """
+        _has_pending_exit should check both exit_pending and exit_status.
+        """
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+        )
+
+        # Position with exit_status=timeout should be considered pending
+        position = Position(
+            position_id="pos_timeout_status",
+            token_id="tok_timeout_status",
+            condition_id="0xtimeout_status",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+            exit_pending=False,  # Not marked pending
+            exit_status="timeout",  # But has timeout status
+            exit_order_id="order_old",
+        )
+
+        assert manager._has_pending_exit(position) is True
+
+    @pytest.mark.asyncio
+    async def test_atomic_claim_fails_for_second_caller(
+        self, mock_db, mock_clob_client, position_tracker
+    ):
+        """
+        Second caller should fail to claim if first already claimed.
+
+        This tests the database-level exclusivity of the atomic claim.
+        """
+        # First call returns ID (success), second returns None (already claimed)
+        call_count = [0]
+
+        async def fetchval_side_effect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return 1  # First caller succeeds
+            return None  # Second caller fails
+
+        mock_db.fetchval.side_effect = fetchval_side_effect
+
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+        )
+
+        position = Position(
+            position_id="pos_race",
+            token_id="tok_race",
+            condition_id="0xrace",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+        position_tracker.positions[position.position_id] = position
+
+        # First claim succeeds
+        claimed1 = await position_tracker.try_claim_exit_atomic(position.position_id)
+        assert claimed1 is True
+
+        # Reset position state for second claim test (simulate another process)
+        position.exit_pending = False
+        position.exit_status = None
+
+        # Second claim fails (DB returns None)
+        claimed2 = await position_tracker.try_claim_exit_atomic(position.position_id)
+        assert claimed2 is False
+
+    @pytest.mark.asyncio
+    async def test_claiming_status_protected_from_reconcile(
+        self, mock_db, mock_clob_client, position_tracker
+    ):
+        """
+        Position with exit_status='claiming' should NOT be cleared by reconcile.
+
+        This protects against race where reconcile runs while order is being submitted.
+        """
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+        )
+
+        # Position in claiming state (order submission in progress)
+        position = Position(
+            position_id="pos_claiming",
+            token_id="tok_claiming",
+            condition_id="0xclaiming",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+            exit_pending=True,
+            exit_status="claiming",
+            exit_order_id=None,  # Order not submitted yet
+        )
+        position_tracker.positions[position.position_id] = position
+
+        # Reconcile should return "pending", NOT "cleared"
+        result = await manager.reconcile_pending_exit(position)
+
+        assert result == "pending"
+        # Position should still be pending
+        assert position.exit_pending is True
+        assert position.exit_status == "claiming"

@@ -34,7 +34,7 @@ export function PositionsTable({
   };
 
   return (
-    <div data-testid="positions-table" className="bg-bg-secondary rounded-lg border border-border overflow-hidden">
+    <div data-testid="positions-table" className="bg-bg-secondary rounded-2xl border border-border overflow-hidden shadow-sm">
       <div className="overflow-x-auto">
         <table className="w-full">
           <thead className="bg-bg-tertiary">
@@ -114,10 +114,10 @@ export function PositionsTable({
                   <div className="flex items-center justify-end gap-2">
                     <button
                       onClick={() => onAdjust(position)}
-                      aria-label={`Adjust position for ${position.question}`}
+                      aria-label={`Limit exit for ${position.question}`}
                       className="px-2 py-1 text-xs bg-accent-blue/20 text-accent-blue rounded hover:bg-accent-blue/30 transition-colors"
                     >
-                      Adjust
+                      Exit Limit
                     </button>
                     <button
                       onClick={() => onClose(position)}

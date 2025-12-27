@@ -120,6 +120,27 @@ class PositionSyncService:
 
         positions: List[RemotePosition] = []
         invalid_entries = 0
+        partial_response = False
+
+        # Check for pagination indicators (Codex review: guard against truncated results)
+        # If the API returns a paginated response, we should not close positions
+        # that appear missing (they might be on the next page)
+        if isinstance(data, dict):
+            # Paginated response format: {"positions": [...], "next_cursor": "...", "has_more": true}
+            if "next_cursor" in data or "has_more" in data or "cursor" in data:
+                logger.warning(
+                    "API response contains pagination indicators. "
+                    "Results may be truncated. Treating as partial."
+                )
+                partial_response = True
+            # Extract positions list from dict if present
+            if "positions" in data:
+                data = data["positions"]
+            elif "data" in data:
+                data = data["data"]
+            else:
+                logger.warning(f"Unexpected paginated response structure: {list(data.keys())}")
+                return positions, True
 
         # Validate response is a list (Codex review: guard against unexpected payloads)
         if not isinstance(data, list):
@@ -174,8 +195,9 @@ class PositionSyncService:
                 f"Skipped {invalid_entries} invalid position entries from API; "
                 f"treating response as partial."
             )
+            partial_response = True
 
-        return positions, invalid_entries > 0
+        return positions, partial_response
 
     async def fetch_trade_timestamps(
         self, wallet_address: str
@@ -589,6 +611,9 @@ class PositionSyncService:
             SET status = 'closed',
                 exit_timestamp = $2,
                 resolution = 'external_close',
+                exit_pending = FALSE,
+                exit_order_id = NULL,
+                exit_status = NULL,
                 updated_at = $2
             WHERE token_id = $1 AND status = 'open'
         """

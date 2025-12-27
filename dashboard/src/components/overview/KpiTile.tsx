@@ -15,7 +15,7 @@ export interface KpiTileProps {
 
 export function KpiTile({ label, value, change, trend, testId }: KpiTileProps) {
   const valueClasses = clsx(
-    'text-2xl font-bold value',
+    'text-2xl font-semibold value',
     {
       'text-accent-green': trend === 'up',
       'text-accent-red': trend === 'down',
@@ -35,17 +35,20 @@ export function KpiTile({ label, value, change, trend, testId }: KpiTileProps) {
   return (
     <div
       data-testid={testId}
-      className="bg-bg-secondary rounded-lg p-4 border border-border"
+      className="relative overflow-hidden rounded-2xl border border-border bg-bg-secondary p-4 shadow-sm"
     >
-      <div className="text-text-secondary text-sm mb-1">{label}</div>
+      <div className="text-[11px] uppercase tracking-[0.3em] text-text-secondary/70 mb-2">
+        {label}
+      </div>
       <div className={valueClasses}>{value}</div>
       {change && (
         <div className={changeClasses}>
-          {trend === 'up' && '↑ '}
-          {trend === 'down' && '↓ '}
+          {trend === 'up' && 'UP '}
+          {trend === 'down' && 'DOWN '}
           {change}
         </div>
       )}
+      <div className="absolute -right-8 -top-8 h-16 w-16 rounded-full bg-accent-blue/10" />
     </div>
   );
 }

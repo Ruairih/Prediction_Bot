@@ -149,7 +149,10 @@ def check_category_filter(
 # =============================================================================
 
 
-def apply_hard_filters(context: "StrategyContext") -> tuple[bool, str]:
+def apply_hard_filters(
+    context: "StrategyContext",
+    max_trade_age_seconds: float = 300.0,
+) -> tuple[bool, str]:
     """
     Apply all hard filters to a context.
 
@@ -170,7 +173,10 @@ def apply_hard_filters(context: "StrategyContext") -> tuple[bool, str]:
         If should_reject is True, reason explains why.
     """
     # 1. Trade age (G1 - Belichick Bug)
-    passes, reason = check_trade_age_filter(context.trade_age_seconds)
+    passes, reason = check_trade_age_filter(
+        context.trade_age_seconds,
+        max_age_seconds=max_trade_age_seconds,
+    )
     if not passes:
         return True, f"G1: {reason}"
 

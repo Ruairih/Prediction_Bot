@@ -5,57 +5,8 @@
 import { useState, useRef, useEffect } from 'react';
 import clsx from 'clsx';
 import { formatDistanceToNow } from 'date-fns';
+import { useHealth, useSystemConfig, useLogs } from '../hooks/useDashboardData';
 import type { SystemHealth, LogEntry, LogLevel, SystemConfig } from '../types';
-
-// Mock data
-const mockHealth: SystemHealth = {
-  overall: 'healthy',
-  services: [
-    { name: 'Trading Engine', status: 'healthy', latencyMs: 12, lastChecked: new Date().toISOString() },
-    { name: 'Price Feed', status: 'healthy', latencyMs: 45, lastChecked: new Date().toISOString() },
-    { name: 'Order Manager', status: 'healthy', latencyMs: 8, lastChecked: new Date().toISOString() },
-    { name: 'Strategy Engine', status: 'degraded', latencyMs: 250, lastChecked: new Date().toISOString(), message: 'High latency' },
-  ],
-  websocket: {
-    connected: true,
-    lastMessageAt: new Date(Date.now() - 5000).toISOString(),
-    reconnectAttempts: 0,
-    subscriptions: 12,
-  },
-  database: {
-    connected: true,
-    latencyMs: 3,
-    poolSize: 10,
-    activeConnections: 2,
-  },
-  rateLimits: [
-    { endpoint: 'CLOB API', limit: 100, remaining: 85, resetAt: new Date(Date.now() + 60000).toISOString(), percentUsed: 15 },
-    { endpoint: 'Price API', limit: 200, remaining: 180, resetAt: new Date(Date.now() + 60000).toISOString(), percentUsed: 10 },
-  ],
-  uptime: 259200, // 3 days in seconds
-  lastHealthCheck: new Date().toISOString(),
-};
-
-const mockLogs: LogEntry[] = [
-  { id: '1', timestamp: new Date().toISOString(), level: 'info', source: 'TradingEngine', message: 'Processing price update for BTC market' },
-  { id: '2', timestamp: new Date(Date.now() - 30000).toISOString(), level: 'info', source: 'OrderManager', message: 'Order filled: BUY 50 @ $0.45' },
-  { id: '3', timestamp: new Date(Date.now() - 60000).toISOString(), level: 'warning', source: 'StrategyEngine', message: 'High latency detected: 250ms' },
-  { id: '4', timestamp: new Date(Date.now() - 120000).toISOString(), level: 'error', source: 'WebSocket', message: 'Connection timeout - reconnecting...' },
-  { id: '5', timestamp: new Date(Date.now() - 180000).toISOString(), level: 'info', source: 'PriceFeed', message: 'Subscribed to 12 market feeds' },
-];
-
-const mockConfig: SystemConfig = {
-  environment: 'production',
-  version: '1.0.0',
-  commitHash: 'abc123def',
-  apiBaseUrl: 'http://localhost:8080',
-  wsBaseUrl: 'ws://localhost:8080',
-  features: {
-    liveTrading: true,
-    backtesting: true,
-    alerts: true,
-  },
-};
 
 const statusColors = {
   healthy: 'bg-accent-green',
@@ -72,9 +23,27 @@ const logLevelColors = {
 };
 
 export function System() {
-  const [health] = useState<SystemHealth>(mockHealth);
-  const [logs] = useState<LogEntry[]>(mockLogs);
-  const [config] = useState<SystemConfig>(mockConfig);
+  const { data: healthData, isLoading: healthLoading, error: healthError } = useHealth();
+  const { data: configData } = useSystemConfig();
+  const { data: logsData } = useLogs(200);
+  const health: SystemHealth = healthData ?? {
+    overall: 'unknown',
+    services: [],
+    websocket: { connected: false, lastMessageAt: null, reconnectAttempts: 0, subscriptions: 0 },
+    database: { connected: false, latencyMs: 0, poolSize: 0, activeConnections: 0 },
+    rateLimits: [],
+    uptime: 0,
+    lastHealthCheck: new Date().toISOString(),
+  };
+  const logs: LogEntry[] = logsData ?? [];
+  const config: SystemConfig = configData ?? {
+    environment: 'development',
+    version: '0.0.0',
+    commitHash: 'unknown',
+    apiBaseUrl: 'http://localhost:9050',
+    wsBaseUrl: 'ws://localhost:9050',
+    features: {},
+  };
   const [logLevel, setLogLevel] = useState<LogLevel | 'all'>('all');
   const [logSearch, setLogSearch] = useState('');
   const [autoScroll, setAutoScroll] = useState(true);
@@ -141,6 +110,16 @@ export function System() {
         </button>
       </div>
 
+      {healthLoading && (
+        <div className="text-sm text-text-secondary">Refreshing health checks...</div>
+      )}
+
+      {healthError && (
+        <div className="bg-accent-red/10 border border-accent-red/30 rounded-2xl p-4">
+          <p className="text-accent-red">Unable to load system health.</p>
+        </div>
+      )}
+
       {/* Overall Health & Uptime */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div data-testid="overall-health-status" className="bg-bg-secondary rounded-lg p-4 border border-border">
@@ -153,7 +132,9 @@ export function System() {
 
         <div data-testid="system-uptime" className="bg-bg-secondary rounded-lg p-4 border border-border">
           <div className="text-text-secondary text-sm mb-2">Uptime</div>
-          <div className="text-xl font-bold text-text-primary">{formatUptime(health.uptime)}</div>
+          <div className="text-xl font-bold text-text-primary">
+            {formatUptime(config.uptime ?? health.uptime ?? 0)}
+          </div>
         </div>
 
         <div className="bg-bg-secondary rounded-lg p-4 border border-border">

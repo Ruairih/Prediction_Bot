@@ -23,7 +23,7 @@ export function PositionsFilters({ filters, onFilterChange }: PositionsFiltersPr
           aria-label="Status filter"
           value={filters.status}
           onChange={(e) => onFilterChange({ status: e.target.value as PositionFilterState['status'] })}
-          className="bg-bg-tertiary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent-blue"
+          className="bg-bg-tertiary border border-border rounded-full px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent-blue"
         >
           <option value="all">All</option>
           <option value="open">Open</option>
@@ -40,7 +40,7 @@ export function PositionsFilters({ filters, onFilterChange }: PositionsFiltersPr
           aria-label="P&L filter"
           value={filters.pnl}
           onChange={(e) => onFilterChange({ pnl: e.target.value as PositionFilterState['pnl'] })}
-          className="bg-bg-tertiary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent-blue"
+          className="bg-bg-tertiary border border-border rounded-full px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent-blue"
         >
           <option value="all">All</option>
           <option value="profitable">Profitable</option>
@@ -55,7 +55,7 @@ export function PositionsFilters({ filters, onFilterChange }: PositionsFiltersPr
           placeholder="Search positions..."
           value={filters.search}
           onChange={(e) => onFilterChange({ search: e.target.value })}
-          className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary placeholder-text-secondary focus:outline-none focus:ring-2 focus:ring-accent-blue"
+          className="w-full bg-bg-tertiary border border-border rounded-full px-3 py-1.5 text-sm text-text-primary placeholder-text-secondary focus:outline-none focus:ring-2 focus:ring-accent-blue"
         />
       </div>
     </div>

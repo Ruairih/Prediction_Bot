@@ -224,6 +224,8 @@ class Position(BaseModel):
     resolution: Optional[str] = None
     entry_order_id: Optional[str] = None
     exit_order_id: Optional[str] = None
+    exit_pending: bool = False
+    exit_status: Optional[str] = None
     entry_timestamp: str
     exit_timestamp: Optional[str] = None
     resolved_at: Optional[str] = None

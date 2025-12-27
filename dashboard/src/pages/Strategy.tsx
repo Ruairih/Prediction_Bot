@@ -2,59 +2,39 @@
  * Strategy Page
  * Strategy configuration and backtesting
  */
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import clsx from 'clsx';
-import type { StrategyConfig, BacktestResult } from '../types';
-
-// Mock data
-const mockStrategy: StrategyConfig = {
-  name: 'Momentum Edge',
-  version: '1.2.0',
-  enabled: true,
-  parameters: [
-    { key: 'priceThreshold', label: 'Price Threshold', type: 'number', value: 0.95, defaultValue: 0.95, min: 0.5, max: 0.99, step: 0.01, unit: '', description: 'Minimum price to trigger entry' },
-    { key: 'minTradeSize', label: 'Min Trade Size', type: 'number', value: 50, defaultValue: 50, min: 10, max: 500, step: 10, unit: 'shares', description: 'Minimum trade size in shares' },
-    { key: 'maxPositions', label: 'Max Positions', type: 'number', value: 5, defaultValue: 5, min: 1, max: 20, step: 1, description: 'Maximum concurrent positions' },
-    { key: 'stopLoss', label: 'Stop Loss', type: 'number', value: 0.15, defaultValue: 0.15, min: 0.05, max: 0.50, step: 0.01, unit: '%', description: 'Stop loss percentage' },
-  ],
-  filters: {
-    blockedCategories: ['Weather', 'Sports'],
-    weatherFilterEnabled: true,
-    minTradeSize: 50,
-    maxTradeAge: 300,
-    minTimeToExpiry: 6,
-    maxPriceDeviation: 0.10,
-  },
-  lastModified: new Date().toISOString(),
-};
-
-const mockBacktests: BacktestResult[] = [
-  {
-    id: 'bt1',
-    status: 'completed',
-    period: { start: '2024-10-01', end: '2024-12-01' },
-    trades: 45,
-    winRate: 0.89,
-    pnl: 125.50,
-    sharpeRatio: 2.1,
-    maxDrawdown: 8.5,
-    equitySeries: [],
-    createdAt: new Date(Date.now() - 86400000).toISOString(),
-    completedAt: new Date(Date.now() - 86400000 + 60000).toISOString(),
-  },
-];
+import { useStrategy, useDecisions } from '../hooks/useDashboardData';
+import { updateRiskLimits, pauseTrading, resumeTrading } from '../api/dashboard';
+import type { StrategyConfig, Signal, RiskLimits } from '../types';
 
 export function Strategy() {
-  const [strategy, setStrategy] = useState<StrategyConfig>(mockStrategy);
-  const [backtests] = useState<BacktestResult[]>(mockBacktests);
+  const { data: strategyData, isLoading, error, refetch } = useStrategy();
+  const { data: decisionsData } = useDecisions(150);
+  const [strategy, setStrategy] = useState<StrategyConfig | null>(null);
   const [hasChanges, setHasChanges] = useState(false);
 
-  const handleToggle = () => {
-    setStrategy({ ...strategy, enabled: !strategy.enabled });
-    setHasChanges(true);
+  useEffect(() => {
+    if (strategyData) {
+      setStrategy(strategyData);
+      setHasChanges(false);
+    }
+  }, [strategyData]);
+
+  const decisions = decisionsData ?? [];
+
+  const handleToggle = async () => {
+    if (!strategy) return;
+    if (strategy.enabled) {
+      await pauseTrading('strategy_toggle');
+    } else {
+      await resumeTrading();
+    }
+    await refetch();
   };
 
   const handleParameterChange = (key: string, value: number | boolean | string) => {
+    if (!strategy) return;
     setStrategy({
       ...strategy,
       parameters: strategy.parameters.map((p) =>
@@ -64,20 +44,32 @@ export function Strategy() {
     setHasChanges(true);
   };
 
-  const handleSave = () => {
-    console.log('Saving strategy:', strategy);
+  const handleSave = async () => {
+    if (!strategy) return;
+    const payload: Partial<RiskLimits> = {};
+    strategy.parameters.forEach((param) => {
+      if (param.key === 'price_threshold') payload.priceThreshold = param.value as number;
+      if (param.key === 'position_size') payload.maxPositionSize = param.value as number;
+      if (param.key === 'max_positions') payload.maxPositions = param.value as number;
+      if (param.key === 'max_price_deviation') payload.maxPriceDeviation = param.value as number;
+      if (param.key === 'stop_loss') payload.stopLoss = param.value as number;
+      if (param.key === 'profit_target') payload.profitTarget = param.value as number;
+      if (param.key === 'min_hold_days') payload.minHoldDays = param.value as number;
+    });
+    await updateRiskLimits(payload);
+    await refetch();
     setHasChanges(false);
-    // TODO: Implement API call
   };
 
   const handleRevert = () => {
-    setStrategy(mockStrategy);
+    if (strategyData) {
+      setStrategy(strategyData);
+    }
     setHasChanges(false);
   };
 
   const handleRunBacktest = () => {
-    console.log('Running backtest...');
-    // TODO: Implement backtest
+    console.log('Backtesting not configured');
   };
 
   return (
@@ -87,6 +79,13 @@ export function Strategy() {
         <p className="text-text-secondary">Configure your trading strategy parameters</p>
       </div>
 
+      {isLoading && <div className="text-sm text-text-secondary">Loading strategy configuration...</div>}
+      {error && (
+        <div className="bg-accent-red/10 border border-accent-red/30 rounded-2xl p-4">
+          <p className="text-accent-red">Unable to load strategy configuration.</p>
+        </div>
+      )}
+
       {/* Strategy Status Card */}
       <div
         data-testid="strategy-status"
@@ -94,27 +93,27 @@ export function Strategy() {
       >
         <div className="flex items-center justify-between">
           <div>
-            <h3 className="text-lg font-semibold text-text-primary">{strategy.name}</h3>
-            <p className="text-sm text-text-secondary">Version {strategy.version}</p>
+            <h3 className="text-lg font-semibold text-text-primary">{strategy?.name ?? 'Strategy'}</h3>
+            <p className="text-sm text-text-secondary">Version {strategy?.version ?? 'n/a'}</p>
           </div>
           <div className="flex items-center gap-4">
             <span className="text-sm text-text-secondary">
-              {strategy.enabled ? 'Enabled' : 'Disabled'}
+              {strategy?.enabled ? 'Enabled' : 'Disabled'}
             </span>
             <button
               role="switch"
-              aria-checked={strategy.enabled}
+              aria-checked={strategy?.enabled ?? false}
               aria-label="Enable strategy"
               onClick={handleToggle}
               className={clsx(
                 'relative w-12 h-6 rounded-full transition-colors',
-                strategy.enabled ? 'bg-accent-green' : 'bg-bg-tertiary'
+                strategy?.enabled ? 'bg-accent-green' : 'bg-bg-tertiary'
               )}
             >
               <span
                 className={clsx(
                   'absolute top-1 w-4 h-4 bg-white rounded-full transition-transform',
-                  strategy.enabled ? 'left-7' : 'left-1'
+                  strategy?.enabled ? 'left-7' : 'left-1'
                 )}
               />
             </button>
@@ -130,7 +129,7 @@ export function Strategy() {
         >
           <h3 className="text-lg font-semibold mb-4 text-text-primary">Parameters</h3>
           <div className="space-y-4">
-            {strategy.parameters.map((param) => (
+            {(strategy?.parameters ?? []).map((param) => (
               <div key={param.key}>
                 <label className="block text-sm text-text-secondary mb-1">
                   {param.label}
@@ -190,7 +189,7 @@ export function Strategy() {
             <div>
               <label className="block text-sm text-text-secondary mb-1">Blocked Categories</label>
               <div className="flex flex-wrap gap-2">
-                {strategy.filters.blockedCategories.map((cat) => (
+                {(strategy?.filters.blockedCategories ?? []).map((cat) => (
                   <span
                     key={cat}
                     className="px-2 py-1 bg-accent-red/20 text-accent-red text-xs rounded"
@@ -203,78 +202,62 @@ export function Strategy() {
 
             <div className="flex items-center justify-between">
               <span className="text-sm text-text-secondary">Weather Filter</span>
-              <span className={strategy.filters.weatherFilterEnabled ? 'text-accent-green' : 'text-accent-red'}>
-                {strategy.filters.weatherFilterEnabled ? 'Enabled' : 'Disabled'}
+              <span className={strategy?.filters.weatherFilterEnabled ? 'text-accent-green' : 'text-accent-red'}>
+                {strategy?.filters.weatherFilterEnabled ? 'Enabled' : 'Disabled'}
               </span>
             </div>
 
             <div className="flex items-center justify-between">
               <span className="text-sm text-text-secondary">Min Trade Size</span>
-              <span className="text-text-primary">{strategy.filters.minTradeSize} shares</span>
+              <span className="text-text-primary">{strategy?.filters.minTradeSize ?? 0}</span>
             </div>
 
             <div className="flex items-center justify-between">
               <span className="text-sm text-text-secondary">Max Trade Age</span>
-              <span className="text-text-primary">{strategy.filters.maxTradeAge}s</span>
+              <span className="text-text-primary">{strategy?.filters.maxTradeAge ?? 0}s</span>
             </div>
 
             <div className="flex items-center justify-between">
               <span className="text-sm text-text-secondary">Min Time to Expiry</span>
-              <span className="text-text-primary">{strategy.filters.minTimeToExpiry}h</span>
+              <span className="text-text-primary">{strategy?.filters.minTimeToExpiry ?? 0}h</span>
             </div>
 
             <div className="flex items-center justify-between">
               <span className="text-sm text-text-secondary">Max Price Deviation</span>
-              <span className="text-text-primary">{(strategy.filters.maxPriceDeviation * 100).toFixed(0)}%</span>
+              <span className="text-text-primary">{((strategy?.filters.maxPriceDeviation ?? 0) * 100).toFixed(0)}%</span>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Backtesting Section */}
-      <div data-testid="backtest-section" className="bg-bg-secondary rounded-lg p-4 border border-border">
+      {/* Decision Log */}
+      <div data-testid="decision-log" className="bg-bg-secondary rounded-lg p-4 border border-border">
         <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold text-text-primary">Backtesting</h3>
+          <h3 className="text-lg font-semibold text-text-primary">Decision Log</h3>
           <button
             onClick={handleRunBacktest}
-            className="px-4 py-2 bg-accent-blue text-white rounded-lg hover:bg-accent-blue/80 transition-colors"
+            className="px-4 py-2 bg-bg-tertiary text-text-primary rounded-lg hover:bg-bg-tertiary/80 transition-colors"
           >
-            Run Backtest
+            Export
           </button>
         </div>
-
-        <div data-testid="backtest-history">
-          <h4 className="text-sm font-medium text-text-secondary mb-2">Recent Backtests</h4>
-          {backtests.length === 0 ? (
-            <p className="text-text-secondary text-sm">No backtests run yet</p>
-          ) : (
-            <div className="space-y-2">
-              {backtests.map((bt) => (
-                <div
-                  key={bt.id}
-                  className="flex items-center justify-between p-3 bg-bg-tertiary rounded-lg"
-                >
-                  <div>
-                    <div className="text-sm text-text-primary">
-                      {bt.period.start} to {bt.period.end}
-                    </div>
-                    <div className="text-xs text-text-secondary">
-                      {bt.trades} trades • {(bt.winRate * 100).toFixed(0)}% win rate
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <div className={bt.pnl >= 0 ? 'text-accent-green' : 'text-accent-red'}>
-                      {bt.pnl >= 0 ? '+' : ''}${bt.pnl.toFixed(2)}
-                    </div>
-                    <div className="text-xs text-text-secondary">
-                      Sharpe: {bt.sharpeRatio.toFixed(2)}
-                    </div>
+        {decisions.length === 0 ? (
+          <p className="text-text-secondary text-sm">No decisions recorded yet.</p>
+        ) : (
+          <div className="space-y-2">
+            {decisions.slice(0, 15).map((decision: Signal) => (
+              <div key={decision.id} className="flex items-center justify-between p-3 bg-bg-tertiary rounded-lg">
+                <div className="min-w-0">
+                  <div className="text-sm text-text-primary truncate">{decision.question}</div>
+                  <div className="text-xs text-text-secondary">
+                    {decision.decision.toUpperCase()} • {decision.modelScore ?? 'n/a'}
                   </div>
                 </div>
-              ))}
-            </div>
-          )}
-        </div>
+                <div className="text-xs text-text-secondary">{new Date(decision.timestamp).toLocaleString()}</div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

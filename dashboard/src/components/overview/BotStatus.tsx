@@ -34,9 +34,17 @@ export function BotStatus({ status, onPause, onStop }: BotStatusProps) {
   return (
     <div
       data-testid="bot-status"
-      className="bg-bg-secondary rounded-lg p-4 border border-border"
+      className="bg-bg-secondary rounded-2xl p-4 border border-border shadow-sm"
     >
-      <h3 className="text-lg font-semibold mb-4 text-text-primary">Bot Status</h3>
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <div className="text-[11px] uppercase tracking-[0.3em] text-text-secondary/70">
+            System
+          </div>
+          <h3 className="text-lg font-semibold text-text-primary">Bot Status</h3>
+        </div>
+        <div className="text-xs text-text-secondary">v{status.version}</div>
+      </div>
 
       <div className="space-y-3">
         {/* Status Row */}
@@ -85,20 +93,20 @@ export function BotStatus({ status, onPause, onStop }: BotStatusProps) {
         <button
           onClick={onPause}
           className={clsx(
-            'flex-1 py-2 px-4 rounded-lg font-medium transition-colors',
-            'bg-accent-yellow/20 text-accent-yellow hover:bg-accent-yellow/30'
+            'flex-1 py-2 px-4 rounded-full font-semibold text-xs transition-colors',
+            'bg-accent-yellow/15 text-accent-yellow hover:bg-accent-yellow/25'
           )}
         >
-          ⏸ Pause
+          {status.mode === 'paused' ? 'Resume' : 'Pause'}
         </button>
         <button
           onClick={onStop}
           className={clsx(
-            'flex-1 py-2 px-4 rounded-lg font-medium transition-colors',
-            'bg-accent-red/20 text-accent-red hover:bg-accent-red/30'
+            'flex-1 py-2 px-4 rounded-full font-semibold text-xs transition-colors',
+            'bg-accent-red/15 text-accent-red hover:bg-accent-red/25'
           )}
         >
-          ⬛ Stop
+          Stop
         </button>
       </div>
     </div>

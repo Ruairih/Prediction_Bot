@@ -24,6 +24,7 @@ from polymarket_bot.execution import (
     OrderStatus,
     Position,
 )
+from polymarket_bot.execution.position_sync import SyncResult
 from polymarket_bot.strategies import (
     EntrySignal,
     ExitSignal,
@@ -43,7 +44,9 @@ def mock_db():
     db.execute = AsyncMock(return_value="UPDATE 1")
     db.fetch = AsyncMock(return_value=[])
     db.fetchrow = AsyncMock(return_value=None)
-    db.fetchval = AsyncMock(return_value=None)
+    # Default to successful atomic claim (return row ID)
+    # Individual tests can override this for failure scenarios
+    db.fetchval = AsyncMock(return_value=1)
     return db
 
 
@@ -223,6 +226,308 @@ class TestStateLoading:
 
         # Should have been called multiple times (orders + positions)
         assert mock_db.fetch.call_count >= 1
+
+
+# =============================================================================
+# Startup Position Sync Tests
+# =============================================================================
+
+
+class TestStartupPositionSync:
+    """
+    Tests for automatic position reconciliation on startup.
+
+    When the bot restarts, it should verify that local positions
+    match what exists on Polymarket. This prevents:
+    - Ghost positions from resolved markets
+    - Externally sold positions still being tracked
+    - Missing externally created positions
+    - Wrong sizes from partial external sells
+    """
+
+    @pytest.fixture
+    def config_with_wallet(self):
+        """Config with wallet address for position sync."""
+        return ExecutionConfig(
+            max_price=Decimal("0.95"),
+            default_position_size=Decimal("20"),
+            min_balance_reserve=Decimal("100"),
+            profit_target=Decimal("0.99"),
+            stop_loss=Decimal("0.90"),
+            min_hold_days=7,
+            wait_for_fill=False,
+            wallet_address="0xTestWallet123",
+            sync_positions_on_startup=True,
+            startup_sync_hold_policy="new",
+        )
+
+    @pytest.fixture
+    def config_sync_disabled(self):
+        """Config with sync disabled."""
+        return ExecutionConfig(
+            max_price=Decimal("0.95"),
+            default_position_size=Decimal("20"),
+            wallet_address="0xTestWallet123",
+            sync_positions_on_startup=False,  # Disabled
+        )
+
+    @pytest.fixture
+    def config_no_wallet(self):
+        """Config without wallet address."""
+        return ExecutionConfig(
+            max_price=Decimal("0.95"),
+            default_position_size=Decimal("20"),
+            wallet_address=None,  # No wallet
+            sync_positions_on_startup=True,
+        )
+
+    @pytest.fixture
+    def mock_sync_result(self):
+        """Successful sync result with changes."""
+        return SyncResult(
+            run_id="test-run-123",
+            positions_found=5,
+            positions_imported=1,
+            positions_updated=2,
+            positions_closed=1,
+            errors=[],
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
+        )
+
+    @pytest.fixture
+    def mock_sync_result_no_changes(self):
+        """Sync result with no changes needed."""
+        return SyncResult(
+            run_id="test-run-456",
+            positions_found=3,
+            positions_imported=0,
+            positions_updated=0,
+            positions_closed=0,
+            errors=[],
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
+        )
+
+    @pytest.mark.asyncio
+    async def test_load_state_calls_startup_position_sync(
+        self, mock_db, mock_clob_client, config_with_wallet
+    ):
+        """load_state should call _startup_position_sync when configured."""
+        service = ExecutionService(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=config_with_wallet,
+        )
+
+        with patch.object(
+            service, "_startup_position_sync", new_callable=AsyncMock
+        ) as mock_sync:
+            await service.load_state()
+
+            mock_sync.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_startup_sync_calls_sync_positions_with_config(
+        self, mock_db, mock_clob_client, config_with_wallet, mock_sync_result
+    ):
+        """Should call sync_positions with wallet and hold_policy from config."""
+        service = ExecutionService(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=config_with_wallet,
+        )
+
+        with patch.object(
+            service._position_sync,
+            "sync_positions",
+            new_callable=AsyncMock,
+            return_value=mock_sync_result,
+        ) as mock_sync:
+            await service._startup_position_sync()
+
+            mock_sync.assert_awaited_once_with(
+                wallet_address="0xTestWallet123",
+                dry_run=False,
+                hold_policy="new",
+            )
+
+    @pytest.mark.asyncio
+    async def test_startup_sync_reloads_positions_on_changes(
+        self, mock_db, mock_clob_client, config_with_wallet, mock_sync_result
+    ):
+        """Should reload positions when sync makes changes."""
+        service = ExecutionService(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=config_with_wallet,
+        )
+
+        with patch.object(
+            service._position_sync,
+            "sync_positions",
+            new_callable=AsyncMock,
+            return_value=mock_sync_result,
+        ):
+            with patch.object(
+                service._position_tracker,
+                "load_positions",
+                new_callable=AsyncMock,
+            ) as mock_load:
+                await service._startup_position_sync()
+
+                # Should reload positions after sync made changes
+                mock_load.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_startup_sync_skips_reload_when_no_changes(
+        self, mock_db, mock_clob_client, config_with_wallet, mock_sync_result_no_changes
+    ):
+        """Should not reload positions when no changes were made."""
+        service = ExecutionService(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=config_with_wallet,
+        )
+
+        with patch.object(
+            service._position_sync,
+            "sync_positions",
+            new_callable=AsyncMock,
+            return_value=mock_sync_result_no_changes,
+        ):
+            with patch.object(
+                service._position_tracker,
+                "load_positions",
+                new_callable=AsyncMock,
+            ) as mock_load:
+                await service._startup_position_sync()
+
+                # Should NOT reload positions when no changes
+                mock_load.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_startup_sync_skipped_when_disabled(
+        self, mock_db, mock_clob_client, config_sync_disabled
+    ):
+        """Should skip sync when sync_positions_on_startup is False."""
+        service = ExecutionService(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=config_sync_disabled,
+        )
+
+        with patch.object(
+            service._position_sync,
+            "sync_positions",
+            new_callable=AsyncMock,
+        ) as mock_sync:
+            await service._startup_position_sync()
+
+            # Should NOT call sync_positions
+            mock_sync.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_startup_sync_skipped_when_no_wallet(
+        self, mock_db, mock_clob_client, config_no_wallet
+    ):
+        """Should skip sync when no wallet_address is configured."""
+        service = ExecutionService(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=config_no_wallet,
+        )
+
+        with patch.object(
+            service._position_sync,
+            "sync_positions",
+            new_callable=AsyncMock,
+        ) as mock_sync:
+            await service._startup_position_sync()
+
+            # Should NOT call sync_positions
+            mock_sync.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_startup_sync_handles_api_failure_gracefully(
+        self, mock_db, mock_clob_client, config_with_wallet, caplog
+    ):
+        """Should log warning and continue when API fails."""
+        service = ExecutionService(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=config_with_wallet,
+        )
+
+        with patch.object(
+            service._position_sync,
+            "sync_positions",
+            new_callable=AsyncMock,
+            side_effect=Exception("Polymarket API unavailable"),
+        ):
+            # Should NOT raise - graceful failure
+            await service._startup_position_sync()
+
+            # Should log warning
+            assert "Startup position sync failed" in caplog.text
+            assert "continuing with DB state" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_startup_sync_does_not_block_startup_on_failure(
+        self, mock_db, mock_clob_client, config_with_wallet
+    ):
+        """API failure should not prevent bot from starting."""
+        service = ExecutionService(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=config_with_wallet,
+        )
+
+        with patch.object(
+            service._position_sync,
+            "sync_positions",
+            new_callable=AsyncMock,
+            side_effect=Exception("Connection timeout"),
+        ):
+            # Full load_state should complete despite sync failure
+            await service.load_state()
+
+            # Bot should still have loaded positions from DB
+            # (empty in this case, but the call completed)
+            assert service._position_tracker is not None
+
+    @pytest.mark.asyncio
+    async def test_startup_sync_uses_configured_hold_policy(
+        self, mock_db, mock_clob_client, mock_sync_result_no_changes
+    ):
+        """Should use the configured hold_policy for imports."""
+        config = ExecutionConfig(
+            max_price=Decimal("0.95"),
+            wallet_address="0xTestWallet",
+            sync_positions_on_startup=True,
+            startup_sync_hold_policy="actual",  # Use actual trade timestamps
+        )
+
+        service = ExecutionService(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=config,
+        )
+
+        with patch.object(
+            service._position_sync,
+            "sync_positions",
+            new_callable=AsyncMock,
+            return_value=mock_sync_result_no_changes,
+        ) as mock_sync:
+            await service._startup_position_sync()
+
+            # Should use "actual" policy
+            mock_sync.assert_awaited_once_with(
+                wallet_address="0xTestWallet",
+                dry_run=False,
+                hold_policy="actual",
+            )
 
 
 # =============================================================================

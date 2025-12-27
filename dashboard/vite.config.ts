@@ -8,11 +8,11 @@ export default defineConfig({
     port: 3000,
     proxy: {
       '/api': {
-        target: 'http://localhost:8080',
+        target: 'http://localhost:9050',
         changeOrigin: true,
       },
       '/health': {
-        target: 'http://localhost:8080',
+        target: 'http://localhost:9050',
         changeOrigin: true,
       },
     },

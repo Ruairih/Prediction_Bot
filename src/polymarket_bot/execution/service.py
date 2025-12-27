@@ -54,6 +54,11 @@ class ExecutionConfig:
     # Wallet address for position sync (G12 fix)
     wallet_address: Optional[str] = None
 
+    # Startup position sync configuration
+    # When enabled, reconciles local positions with Polymarket on startup
+    sync_positions_on_startup: bool = True
+    startup_sync_hold_policy: str = "new"  # "new", "mature", or "actual"
+
     @property
     def order_config(self) -> OrderConfig:
         """Get order configuration."""
@@ -136,6 +141,7 @@ class ExecutionService:
         self._db = db
         self._clob_client = clob_client
         self._config = config or ExecutionConfig()
+        self._event_sink: Optional[Any] = None
 
         # Initialize managers
         self._balance_manager = BalanceManager(
@@ -163,6 +169,19 @@ class ExecutionService:
             position_tracker=self._position_tracker,
         )
 
+    def set_event_sink(self, sink: Optional[Any]) -> None:
+        """Register a callback for execution events."""
+        self._event_sink = sink
+
+    def _emit_event(self, event: dict) -> None:
+        """Send an event to the registered sink if available."""
+        if not self._event_sink:
+            return
+        try:
+            self._event_sink(event)
+        except Exception as exc:
+            logger.debug(f"Event sink error: {exc}")
+
     @property
     def position_tracker(self) -> PositionTracker:
         """Access to position tracker for queries."""
@@ -183,7 +202,7 @@ class ExecutionService:
         Load state from database on startup.
 
         Should be called during initialization to restore:
-        - Open positions
+        - Open positions (reconciled with Polymarket if wallet_address configured)
         - Open orders (with balance reservations)
         - Balance cache
         """
@@ -204,14 +223,92 @@ class ExecutionService:
                 except Exception as e:
                     logger.warning(f"Could not sync order {order.order_id}: {e}")
 
-        # Load open positions
+        # Load open positions from database first
         await self._position_tracker.load_positions()
+
+        # STARTUP POSITION SYNC: Reconcile local positions with Polymarket
+        # This detects: externally closed positions, new external positions,
+        # size changes from partial sells, and resolved markets while offline
+        await self._startup_position_sync()
 
         open_positions = len(self._position_tracker.get_open_positions())
         open_orders = len(self._order_manager.get_open_orders())
         logger.info(
             f"Loaded state: {open_positions} positions, {open_orders} orders"
         )
+
+    async def _startup_position_sync(self) -> None:
+        """
+        Reconcile local positions with Polymarket on startup.
+
+        This is critical because while offline:
+        - Markets may have resolved (positions closed)
+        - User may have manually sold positions
+        - User may have created positions externally
+        - Partial sells may have changed position sizes
+
+        Without this sync, the bot would:
+        - Try to exit positions that no longer exist (CLOB rejects)
+        - Miss managing externally created positions
+        - Use wrong position sizes for exits
+        - Keep "ghost" positions from resolved markets
+
+        Errors are handled gracefully - if Polymarket API is down,
+        we log a warning and continue with database state.
+        """
+        wallet_address = self._config.wallet_address
+
+        # Skip if not configured
+        if not wallet_address:
+            logger.debug("Startup position sync skipped: no wallet_address configured")
+            return
+
+        if not self._config.sync_positions_on_startup:
+            logger.debug("Startup position sync disabled by config")
+            return
+
+        logger.info(f"Startup position sync: reconciling with Polymarket...")
+
+        try:
+            result = await self._position_sync.sync_positions(
+                wallet_address=wallet_address,
+                dry_run=False,
+                hold_policy=self._config.startup_sync_hold_policy,
+            )
+
+            # Log results
+            imported = result.positions_imported
+            updated = result.positions_updated
+            closed = result.positions_closed
+
+            if imported > 0 or updated > 0 or closed > 0:
+                logger.info(
+                    f"Startup position sync complete: "
+                    f"{imported} imported, {updated} updated, {closed} closed"
+                )
+            else:
+                logger.info("Startup position sync: positions already in sync")
+
+            # Log any partial failures (DB errors, etc.)
+            if result.errors:
+                for error in result.errors:
+                    logger.warning(f"Startup position sync partial error: {error}")
+
+            # Reload positions after sync to get updated state
+            if imported > 0 or updated > 0 or closed > 0:
+                await self._position_tracker.load_positions()
+
+        except Exception as e:
+            # Don't block startup on sync failure - log warning and continue
+            # The bot can still operate with stale data, and background sync
+            # will eventually reconcile
+            logger.warning(
+                f"Startup position sync failed (continuing with DB state): {e}"
+            )
+            logger.warning(
+                "Positions may be out of sync with Polymarket. "
+                "Run manual sync or wait for background reconciliation."
+            )
 
     async def sync_position_sizes(self) -> int:
         """
@@ -232,6 +329,37 @@ class ExecutionService:
         logger.info(f"sync_position_sizes: syncing for {wallet_address[:10]}...")
         result = await self._position_sync.quick_sync_sizes(wallet_address)
         return result.get("updated", 0)
+
+    def update_config(
+        self,
+        *,
+        max_price: Optional[Decimal] = None,
+        default_position_size: Optional[Decimal] = None,
+        min_balance_reserve: Optional[Decimal] = None,
+        profit_target: Optional[Decimal] = None,
+        stop_loss: Optional[Decimal] = None,
+        min_hold_days: Optional[int] = None,
+    ) -> None:
+        """Update execution configuration in place."""
+        if max_price is not None:
+            self._config.max_price = max_price
+            self._order_manager.config.max_price = max_price
+        if default_position_size is not None:
+            self._config.default_position_size = default_position_size
+            self._order_manager.config.position_size = default_position_size
+        if min_balance_reserve is not None:
+            self._config.min_balance_reserve = min_balance_reserve
+            self._order_manager.config.min_balance_reserve = min_balance_reserve
+            self._balance_manager._config.min_reserve = min_balance_reserve
+        if profit_target is not None:
+            self._config.profit_target = profit_target
+            self._exit_manager._config.profit_target = profit_target
+        if stop_loss is not None:
+            self._config.stop_loss = stop_loss
+            self._exit_manager._config.stop_loss = stop_loss
+        if min_hold_days is not None:
+            self._config.min_hold_days = min_hold_days
+            self._exit_manager._config.min_hold_days = min_hold_days
 
     async def execute_entry(
         self,
@@ -278,6 +406,28 @@ class ExecutionService:
                 if position:
                     position_id = position.position_id
                     logger.info(f"Created position {position_id} from order {order_id}")
+                    self._emit_event({
+                        "type": "position",
+                        "action": "opened",
+                        "position_id": position.position_id,
+                        "token_id": position.token_id,
+                        "condition_id": position.condition_id,
+                        "size": str(position.size),
+                        "entry_price": str(position.entry_price),
+                    })
+
+            self._emit_event({
+                "type": "order",
+                "action": "submitted",
+                "order_id": order_id,
+                "token_id": signal.token_id,
+                "condition_id": context.condition_id,
+                "side": signal.side,
+                "price": str(signal.price),
+                "size": str(signal.size),
+                "status": order.status.value if order else "pending",
+                "position_id": position_id,
+            })
 
             return ExecutionResult(
                 success=True,
@@ -323,13 +473,14 @@ class ExecutionService:
         signal: "ExitSignal",
         position: Position,
         current_price: Optional[Decimal] = None,
+        wait_for_fill: Optional[bool] = None,
     ) -> ExecutionResult:
         """
         Execute an exit signal.
 
         Handles:
         1. Exit order submission
-        2. Fill confirmation (wait for fill)
+        2. Fill confirmation (wait for fill, if enabled)
         3. Position closure
         4. Balance refresh (G4)
 
@@ -337,6 +488,7 @@ class ExecutionService:
             signal: Exit signal from strategy
             position: Position to close
             current_price: Current market price for exit
+            wait_for_fill: Whether to wait for fill. None uses config default.
 
         Returns:
             ExecutionResult indicating success/failure
@@ -344,24 +496,52 @@ class ExecutionService:
         try:
             exit_price = current_price or position.entry_price  # Fallback
 
-            success = await self._exit_manager.execute_exit(
+            # Use explicit wait_for_fill if provided, otherwise use config
+            should_wait = wait_for_fill if wait_for_fill is not None else self._config.wait_for_fill
+
+            success, order_id = await self._exit_manager.execute_exit(
                 position=position,
                 current_price=exit_price,
                 reason=signal.reason,
-                wait_for_fill=self._config.wait_for_fill,
+                wait_for_fill=should_wait,
                 fill_timeout_seconds=self._config.fill_timeout_seconds,
             )
 
             if success:
-                logger.info(f"Exited position {position.position_id}: {signal.reason}")
+                # Different messaging for wait vs no-wait
+                if should_wait:
+                    logger.info(f"Exited position {position.position_id}: {signal.reason}")
+                    self._emit_event({
+                        "type": "position",
+                        "action": "closed",
+                        "position_id": position.position_id,
+                        "token_id": position.token_id,
+                        "condition_id": position.condition_id,
+                        "reason": signal.reason,
+                    })
+                else:
+                    logger.info(
+                        f"Exit order {order_id} submitted for {position.position_id}: {signal.reason}"
+                    )
+                    self._emit_event({
+                        "type": "position",
+                        "action": "exit_submitted",
+                        "position_id": position.position_id,
+                        "token_id": position.token_id,
+                        "condition_id": position.condition_id,
+                        "order_id": order_id,
+                        "reason": signal.reason,
+                    })
                 return ExecutionResult(
                     success=True,
                     position_id=position.position_id,
+                    order_id=order_id,
                 )
             else:
                 return ExecutionResult(
                     success=False,
                     position_id=position.position_id,
+                    order_id=order_id,
                     error="Exit order not confirmed",
                     error_type="fill_timeout",
                 )
@@ -374,6 +554,77 @@ class ExecutionService:
                 error=str(e),
                 error_type="exit_error",
             )
+
+    async def close_position(
+        self,
+        position_id: str,
+        reason: str = "manual_close",
+        current_price: Optional[Decimal] = None,
+        wait_for_fill: Optional[bool] = None,
+    ) -> ExecutionResult:
+        """
+        Manually close a single position.
+
+        Args:
+            position_id: Position to close
+            reason: Reason for closing
+            current_price: Price to use for exit order
+            wait_for_fill: Whether to wait for fill confirmation.
+                          If None, uses config default.
+                          For dashboard calls, pass False for quick response.
+
+        Returns:
+            ExecutionResult with success/error info and order_id if submitted
+        """
+        position = self._position_tracker.get_position(position_id)
+        if not position:
+            return ExecutionResult(
+                success=False,
+                position_id=position_id,
+                error="Position not found",
+                error_type="not_found",
+            )
+
+        from polymarket_bot.strategies import ExitSignal
+
+        exit_signal = ExitSignal(position_id=position_id, reason=reason)
+        price = current_price or position.entry_price
+        return await self.execute_exit(
+            exit_signal,
+            position,
+            current_price=price,
+            wait_for_fill=wait_for_fill,
+        )
+
+    async def flatten_positions(self, reason: str = "manual_flatten") -> int:
+        """Close all open positions."""
+        positions = list(self._position_tracker.get_open_positions())
+        closed_count = 0
+        for position in positions:
+            result = await self.close_position(position.position_id, reason=reason)
+            if result.success:
+                closed_count += 1
+        return closed_count
+
+    async def cancel_order(self, order_id: str) -> bool:
+        """Cancel a single open order."""
+        success = await self._order_manager.cancel_order(order_id)
+        if success:
+            self._emit_event({
+                "type": "order",
+                "action": "cancelled",
+                "order_id": order_id,
+            })
+        return success
+
+    async def cancel_all_orders(self) -> int:
+        """Cancel all open orders."""
+        open_orders = list(self._order_manager.get_open_orders())
+        cancelled = 0
+        for order in open_orders:
+            if await self.cancel_order(order.order_id):
+                cancelled += 1
+        return cancelled
 
     async def sync_open_orders(self) -> int:
         """
@@ -410,6 +661,17 @@ class ExecutionService:
                             f"Order {order.order_id} fill detected: "
                             f"+{new_filled} (total: {updated.filled_size}/{updated.size})"
                         )
+                        self._emit_event({
+                            "type": "fill",
+                            "action": updated.status.value if updated.status else "partial",
+                            "order_id": updated.order_id,
+                            "token_id": updated.token_id,
+                            "condition_id": updated.condition_id,
+                            "delta_size": str(new_filled),
+                            "filled_size": str(updated.filled_size),
+                            "size": str(updated.size),
+                            "avg_fill_price": str(updated.avg_fill_price) if updated.avg_fill_price else None,
+                        })
 
                     # Reservation adjustments are handled in OrderManager.sync_order_status
 
@@ -435,6 +697,16 @@ class ExecutionService:
 
         for position in self._position_tracker.get_open_positions():
             current_price = current_prices.get(position.token_id)
+            if self._exit_manager._has_pending_exit(position):
+                pending_status = await self._exit_manager.reconcile_pending_exit(
+                    position,
+                    current_price=current_price,
+                    reason=None,
+                    stale_after_seconds=self._config.fill_timeout_seconds,
+                )
+                if pending_status in ("pending", "closed"):
+                    continue
+
             if current_price is None:
                 continue
 
