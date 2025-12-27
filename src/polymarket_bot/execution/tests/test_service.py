@@ -578,6 +578,19 @@ class TestEntryExecution:
         assert result.position_id is not None
 
     @pytest.mark.asyncio
+    async def test_entry_releases_reservation_after_fill(
+        self, execution_service, entry_signal, strategy_context
+    ):
+        """Successful fills should release reservations and create positions."""
+        result = await execution_service.execute_entry(entry_signal, strategy_context)
+
+        assert result.success is True
+        assert result.position_id is not None
+        assert result.order_id is not None
+
+        assert not execution_service.balance_manager.has_reservation(result.order_id)
+
+    @pytest.mark.asyncio
     async def test_execute_entry_handles_price_too_high(
         self, execution_service, strategy_context
     ):
@@ -761,6 +774,50 @@ class TestOrderSync:
         updated_order = execution_service._order_manager._orders["order_partial"]
         assert updated_order.filled_size == Decimal("10")
         assert updated_order.status == OrderStatus.PARTIAL
+
+    @pytest.mark.asyncio
+    async def test_sync_records_fill_deltas_only(
+        self, execution_service, mock_clob_client
+    ):
+        """Multiple syncs should only apply delta fills to positions."""
+        order = Order(
+            order_id="order_delta",
+            token_id="tok_delta",
+            condition_id="0xtest",
+            side="BUY",
+            price=Decimal("0.95"),
+            size=Decimal("20"),
+            filled_size=Decimal("0"),
+            status=OrderStatus.LIVE,
+        )
+        execution_service._order_manager._orders[order.order_id] = order
+
+        mock_clob_client.get_order.side_effect = [
+            {
+                "orderID": "order_delta",
+                "status": "LIVE",
+                "filledSize": "5",
+                "size": "20",
+                "avgPrice": "0.95",
+            },
+            {
+                "orderID": "order_delta",
+                "status": "LIVE",
+                "filledSize": "8",
+                "size": "20",
+                "avgPrice": "0.95",
+            },
+        ]
+
+        await execution_service.sync_open_orders()
+        position = execution_service._position_tracker.get_position_by_token("tok_delta")
+        assert position is not None
+        assert position.size == Decimal("5")
+
+        await execution_service.sync_open_orders()
+        position = execution_service._position_tracker.get_position_by_token("tok_delta")
+        assert position is not None
+        assert position.size == Decimal("8")
 
 
 # =============================================================================

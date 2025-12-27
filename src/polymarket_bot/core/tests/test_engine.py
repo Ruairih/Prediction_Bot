@@ -194,6 +194,26 @@ class TestTriggerDeduplication:
 
         assert trading_engine.stats.triggers_evaluated == 1
 
+    @pytest.mark.asyncio
+    async def test_duplicate_events_are_ignored(
+        self, trading_engine, price_trigger_event, mock_db, mock_strategy
+    ):
+        """Duplicate WebSocket events should not re-trigger strategy evaluation."""
+        mock_db.fetchrow.return_value = {
+            "question": "Test?",
+            "outcome": "Yes",
+            "outcome_index": 0,
+            "market_id": "market_123",
+        }
+        # First event: no existing triggers (token + condition checks)
+        # Second event: existing trigger found
+        mock_db.fetchval.side_effect = [None, None, 1]
+
+        await trading_engine.process_event(price_trigger_event)
+        await trading_engine.process_event(price_trigger_event)
+
+        assert mock_strategy.evaluate.call_count == 1
+
 
 class TestSignalRouting:
     """Tests for routing signals to handlers."""

@@ -254,6 +254,28 @@ class TestMarketResolution:
 
         assert result is False
 
+    @pytest.mark.asyncio
+    async def test_resolution_clears_pending_exit_state(
+        self, exit_manager, sample_position, mock_db
+    ):
+        """Resolution should clear pending exit flags to avoid stuck positions."""
+        sample_position.exit_pending = True
+        sample_position.exit_order_id = "order_pending"
+        sample_position.exit_status = "pending"
+        exit_manager._position_tracker.positions[sample_position.position_id] = sample_position
+        exit_manager._position_tracker._token_positions[sample_position.token_id] = sample_position.position_id
+
+        result = await exit_manager.handle_resolution(
+            token_id=sample_position.token_id,
+            resolved_price=Decimal("1.00"),
+        )
+
+        assert result is True
+        position = exit_manager._position_tracker.get_position(sample_position.position_id)
+        assert position.exit_pending is False
+        assert position.exit_order_id is None
+        assert position.exit_status is None
+
 
 class TestConfigOverrides:
     """Tests for configuration overrides."""
@@ -475,6 +497,47 @@ class TestOrderFillConfirmation:
         assert success is False
 
         # Position should NOT be closed
+        pos = position_tracker.get_position(position.position_id)
+        assert pos.status != "closed"
+
+    @pytest.mark.asyncio
+    async def test_does_not_close_on_expiration(
+        self, mock_db, mock_clob_client, position_tracker
+    ):
+        """Expired exit orders should not close positions."""
+        mock_clob_client.get_order.return_value = {
+            "orderID": "order_expired",
+            "status": "EXPIRED",
+            "filledSize": "0",
+            "size": "20",
+        }
+
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+        )
+
+        position = Position(
+            position_id="pos_expired",
+            token_id="tok_expired",
+            condition_id="0xexpired",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+        position_tracker.positions[position.position_id] = position
+
+        success, order_id = await manager.execute_exit(
+            position,
+            current_price=Decimal("0.99"),
+            reason="profit_target",
+            wait_for_fill=True,
+            fill_timeout_seconds=1.0,
+        )
+
+        assert success is False
         pos = position_tracker.get_position(position.position_id)
         assert pos.status != "closed"
 

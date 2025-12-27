@@ -4,6 +4,7 @@ Tests for trigger tracking and deduplication.
 We only trade the FIRST time a token crosses threshold.
 Critical: G2 protection - use (token_id, condition_id) as key.
 """
+import asyncio
 import pytest
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -409,3 +410,82 @@ class TestAtomicTriggerRecording:
         )
 
         assert result is False
+
+
+class TestAtomicTriggerConcurrency:
+    """Tests for concurrent atomic trigger recording."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_atomic_calls_only_one_succeeds(self):
+        """Concurrent calls should allow only one trigger per condition."""
+        lock = asyncio.Lock()
+        store: set[tuple[str, float]] = set()
+
+        class FakeConn:
+            def __init__(self, shared_lock, shared_store):
+                self._lock = shared_lock
+                self._store = shared_store
+                self._lock_acquired = False
+
+            async def execute(self, query, *args):
+                if "pg_advisory_xact_lock" in query:
+                    await self._lock.acquire()
+                    self._lock_acquired = True
+                return "OK"
+
+            async def fetchval(self, query, *args):
+                normalized = " ".join(query.split()).upper()
+                if normalized.startswith("SELECT 1 FROM POLYMARKET_FIRST_TRIGGERS"):
+                    condition_id = args[0]
+                    threshold = float(args[1])
+                    return 1 if (condition_id, threshold) in self._store else None
+                if normalized.startswith("INSERT INTO POLYMARKET_FIRST_TRIGGERS"):
+                    token_id = args[0]
+                    condition_id = args[1]
+                    threshold = float(args[2])
+                    key = (condition_id, threshold)
+                    if key in self._store:
+                        return None
+                    self._store.add(key)
+                    return token_id
+                return None
+
+        class FakeTransaction:
+            def __init__(self, shared_lock, shared_store):
+                self._lock = shared_lock
+                self._conn = FakeConn(shared_lock, shared_store)
+
+            async def __aenter__(self):
+                return self._conn
+
+            async def __aexit__(self, *args):
+                if self._conn._lock_acquired:
+                    self._lock.release()
+                    self._conn._lock_acquired = False
+
+        class FakeDB:
+            def __init__(self, shared_lock, shared_store):
+                self._lock = shared_lock
+                self._store = shared_store
+
+            def transaction(self):
+                return FakeTransaction(self._lock, self._store)
+
+        tracker = TriggerTracker(FakeDB(lock, store))
+
+        results = await asyncio.gather(
+            tracker.try_record_trigger_atomic(
+                token_id="tok_a",
+                condition_id="cond_1",
+                threshold=Decimal("0.95"),
+            ),
+            tracker.try_record_trigger_atomic(
+                token_id="tok_b",
+                condition_id="cond_1",
+                threshold=Decimal("0.95"),
+            ),
+        )
+
+        assert results.count(True) == 1
+        assert results.count(False) == 1
+        assert ("cond_1", 0.95) in store

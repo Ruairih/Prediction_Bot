@@ -39,6 +39,26 @@ class TestPositionCreation:
         assert len(positions) == 0
 
     @pytest.mark.asyncio
+    async def test_ignores_zero_size_fill(self, position_tracker, mock_db):
+        """Zero-size fills should not create positions."""
+        zero_fill = Order(
+            order_id="order_zero",
+            token_id="tok_yes_abc",
+            condition_id="0x123",
+            side="BUY",
+            size=Decimal("20"),
+            filled_size=Decimal("0"),
+            price=Decimal("0.95"),
+            avg_fill_price=Decimal("0.95"),
+            status=OrderStatus.FILLED,
+        )
+
+        position = await position_tracker.record_fill(zero_fill)
+
+        assert position is None
+        assert position_tracker.get_open_positions() == []
+
+    @pytest.mark.asyncio
     async def test_aggregates_multiple_fills(self, position_tracker, mock_db):
         """Should aggregate fills for same token."""
         # First fill
@@ -201,6 +221,21 @@ class TestPositionClosure:
         # Entry: 0.95, Exit: 0.99, Size: 20
         # PnL = 20 * (0.99 - 0.95) = $0.80
         assert exit_event.net_pnl == Decimal("0.80")
+
+    @pytest.mark.asyncio
+    async def test_records_negative_realized_pnl(self, position_tracker, mock_db, sample_position):
+        """Should record negative realized P&L on loss."""
+        position_tracker.positions[sample_position.position_id] = sample_position
+
+        exit_event = await position_tracker.close_position(
+            sample_position.position_id,
+            exit_price=Decimal("0.90"),
+            reason="stop_loss",
+        )
+
+        assert exit_event is not None
+        assert exit_event.net_pnl == Decimal("-1.00")
+        assert position_tracker.positions[sample_position.position_id].realized_pnl == Decimal("-1.00")
 
     @pytest.mark.asyncio
     async def test_persists_exit_metadata(self, position_tracker, mock_db, sample_position):

@@ -4,6 +4,7 @@ Database connection tests.
 Tests for async PostgreSQL connection management.
 """
 import pytest
+from unittest.mock import AsyncMock
 
 from polymarket_bot.storage.database import Database, DatabaseConfig
 
@@ -114,3 +115,41 @@ class TestDatabaseUnreachable:
         with pytest.raises(Exception):  # Connection error
             async with db.transaction():
                 pass
+
+
+@pytest.mark.asyncio
+class TestDatabaseRecovery:
+    """Tests for reconnection and retry behavior."""
+
+    async def test_ensure_connected_triggers_reconnect_when_pool_closed(self):
+        """Should attempt reconnect when pool is missing/closed."""
+        db = Database(DatabaseConfig())
+        db._pool = None
+        db._reconnect = AsyncMock()
+
+        await db._ensure_connected()
+
+        db._reconnect.assert_awaited_once()
+
+    async def test_with_retry_reconnects_after_transient_error(self):
+        """Transient errors should trigger reconnect and retry."""
+        config = DatabaseConfig(
+            retry_max_attempts=2,
+            retry_initial_delay=0.0,
+            retry_max_delay=0.0,
+        )
+        db = Database(config)
+        db._ensure_connected = AsyncMock()
+
+        attempts = {"count": 0}
+
+        async def flaky_operation():
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise ConnectionResetError("lost connection")
+            return "ok"
+
+        result = await db._with_retry(flaky_operation)
+
+        assert result == "ok"
+        db._ensure_connected.assert_awaited()

@@ -4,6 +4,7 @@ Tests for order submission and tracking.
 Orders interact with the Polymarket CLOB API.
 All API calls must be mocked.
 """
+import asyncio
 import pytest
 from decimal import Decimal
 from unittest.mock import AsyncMock
@@ -15,6 +16,7 @@ from polymarket_bot.execution import (
     PriceTooHighError,
     InsufficientBalanceError,
 )
+from polymarket_bot.execution.order_manager import OrderSubmissionError
 
 
 class TestOrderSubmission:
@@ -90,6 +92,85 @@ class TestOrderSubmission:
 
         assert order_id == "sell_order"
 
+    @pytest.mark.asyncio
+    async def test_releases_reservation_on_network_failure(self, mock_db, mock_clob_client):
+        """Network errors should release reservations to prevent balance lockup."""
+        mock_clob_client.create_and_post_order.side_effect = ConnectionError("network down")
+
+        manager = OrderManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=OrderConfig(max_price=Decimal("0.95")),
+        )
+
+        balance_before = manager.get_available_balance()
+
+        with pytest.raises(ConnectionError):
+            await manager.submit_order(
+                token_id="tok_yes_abc",
+                side="BUY",
+                price=Decimal("0.95"),
+                size=Decimal("20"),
+            )
+
+        balance_after = manager.get_available_balance()
+
+        assert balance_after == balance_before
+        assert manager._balance_manager.get_active_reservations() == []
+
+    @pytest.mark.asyncio
+    async def test_rejects_empty_order_id_and_releases_reservation(
+        self, mock_db, mock_clob_client
+    ):
+        """Empty order IDs should raise and not leak reservations."""
+        mock_clob_client.create_and_post_order.return_value = {"orderID": " "}
+
+        manager = OrderManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=OrderConfig(max_price=Decimal("0.95")),
+        )
+
+        balance_before = manager.get_available_balance()
+
+        with pytest.raises(OrderSubmissionError):
+            await manager.submit_order(
+                token_id="tok_yes_abc",
+                side="BUY",
+                price=Decimal("0.95"),
+                size=Decimal("20"),
+            )
+
+        balance_after = manager.get_available_balance()
+
+        assert balance_after == balance_before
+        assert manager._balance_manager.get_active_reservations() == []
+
+    @pytest.mark.asyncio
+    async def test_concurrent_submissions_prevent_over_reservation(
+        self, order_manager
+    ):
+        """Concurrent submissions should not over-allocate balance."""
+        async def submit(size: Decimal):
+            return await order_manager.submit_order(
+                token_id=f"tok_{size}",
+                side="BUY",
+                price=Decimal("0.95"),
+                size=size,
+            )
+
+        results = await asyncio.gather(
+            submit(Decimal("600")),  # Costs $570
+            submit(Decimal("600")),  # Would exceed tradeable balance
+            return_exceptions=True,
+        )
+
+        errors = [r for r in results if isinstance(r, Exception)]
+        successes = [r for r in results if not isinstance(r, Exception)]
+
+        assert len(successes) == 1
+        assert any(isinstance(err, InsufficientBalanceError) for err in errors)
+
 
 class TestOrderTracking:
     """Tests for order status tracking."""
@@ -131,6 +212,83 @@ class TestOrderTracking:
 
         assert order.status == OrderStatus.PARTIAL
         assert order.filled_size == Decimal("10")
+
+    @pytest.mark.asyncio
+    async def test_partial_fill_adjusts_reservation_with_avg_price(
+        self, mock_db, mock_clob_client
+    ):
+        """Partial fills should release reserved balance based on avg fill price."""
+        manager = OrderManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=OrderConfig(max_price=Decimal("0.95")),
+        )
+
+        order_id = await manager.submit_order(
+            token_id="tok_yes_abc",
+            side="BUY",
+            price=Decimal("0.95"),
+            size=Decimal("20"),
+        )
+
+        # Partial fill: 10 shares at 0.90 average
+        mock_clob_client.get_order.return_value = {
+            "orderID": order_id,
+            "status": "LIVE",
+            "filledSize": "10",
+            "size": "20",
+            "avgPrice": "0.90",
+        }
+
+        await manager.sync_order_status(order_id)
+
+        reservation = manager._balance_manager.get_reservation(order_id)
+        assert reservation is not None
+        assert reservation.amount == Decimal("10.00")
+
+    @pytest.mark.asyncio
+    async def test_unknown_status_keeps_reservation(self, order_manager, mock_clob_client):
+        """Unexpected statuses should not release reservations prematurely."""
+        order_id = await order_manager.submit_order(
+            token_id="tok_yes_abc",
+            side="BUY",
+            price=Decimal("0.95"),
+            size=Decimal("20"),
+        )
+
+        mock_clob_client.get_order.return_value = {
+            "orderID": order_id,
+            "status": "PAUSED",
+            "filledSize": "0",
+            "size": "20",
+        }
+
+        order = await order_manager.sync_order_status(order_id)
+
+        assert order.status == OrderStatus.PENDING
+        assert order_manager._balance_manager.has_reservation(order_id)
+
+    @pytest.mark.asyncio
+    async def test_expired_status_releases_reservation(self, order_manager, mock_clob_client):
+        """Expired orders should be marked failed and release reservations."""
+        order_id = await order_manager.submit_order(
+            token_id="tok_yes_abc",
+            side="BUY",
+            price=Decimal("0.95"),
+            size=Decimal("20"),
+        )
+
+        mock_clob_client.get_order.return_value = {
+            "orderID": order_id,
+            "status": "EXPIRED",
+            "filledSize": "0",
+            "size": "20",
+        }
+
+        order = await order_manager.sync_order_status(order_id)
+
+        assert order.status == OrderStatus.FAILED
+        assert not order_manager._balance_manager.has_reservation(order_id)
 
     @pytest.mark.asyncio
     async def test_gets_open_orders(self, order_manager, mock_clob_client):

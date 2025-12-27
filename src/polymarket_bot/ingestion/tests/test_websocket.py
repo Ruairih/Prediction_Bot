@@ -361,3 +361,41 @@ class TestRealPolymarketMessages:
 
         # Should use best bid (0.002 - highest bid price) as fallback
         assert call_args.price == Decimal("0.002")
+
+
+class TestReconnectionBehavior:
+    """Tests for reconnect and subscription persistence."""
+
+    @pytest.mark.asyncio
+    async def test_resubscribes_on_connect(self):
+        """Previously subscribed tokens should be re-sent on reconnect."""
+        callback = AsyncMock()
+        ws = PolymarketWebSocket(on_price_update=callback)
+        ws._subscribed_tokens.update({"tok_1", "tok_2"})
+
+        fake_ws = AsyncMock()
+        with patch(
+            "polymarket_bot.ingestion.websocket.websockets.connect",
+            new=AsyncMock(return_value=fake_ws),
+        ), patch.object(ws, "_receive_loop", new=AsyncMock()), patch.object(
+            ws, "_heartbeat_loop", new=AsyncMock()
+        ):
+            await ws._connect()
+
+        assert fake_ws.send.called
+        sent = json.loads(fake_ws.send.call_args[0][0])
+        assert set(sent["assets_ids"]) == {"tok_1", "tok_2"}
+
+    @pytest.mark.asyncio
+    async def test_schedule_reconnect_increments_counter(self):
+        """Reconnect attempts should increment reconnect_count."""
+        callback = AsyncMock()
+        ws = PolymarketWebSocket(
+            on_price_update=callback,
+            initial_reconnect_delay=0.0,
+        )
+
+        with patch.object(ws, "_connect", new=AsyncMock()):
+            await ws._schedule_reconnect()
+
+        assert ws.reconnect_count == 1
