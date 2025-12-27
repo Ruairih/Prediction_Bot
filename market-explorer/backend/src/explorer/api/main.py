@@ -331,21 +331,54 @@ class CategoryDetailResponse(BaseModel):
     active_markets: int
 
 
-@app.get("/api/categories/detailed", response_model=list[CategoryDetailResponse])
+class PaginatedCategoriesResponse(BaseModel):
+    """Paginated categories response."""
+
+    items: list[CategoryDetailResponse]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+
+
+@app.get("/api/categories/detailed", response_model=PaginatedCategoriesResponse)
 async def get_categories_detailed(
     repo: Annotated[MarketRepository, Depends(get_market_repo)],
     include_closed: Annotated[bool, Query(description="Include closed/resolved markets")] = False,
     min_markets: Annotated[int, Query(ge=1, description="Minimum markets per category")] = 1,
-) -> list[CategoryDetailResponse]:
+    page: Annotated[int, Query(ge=1, description="Page number")] = 1,
+    page_size: Annotated[int, Query(ge=1, le=500, description="Items per page")] = 50,
+    search: Annotated[Optional[str], Query(description="Search category names")] = None,
+) -> PaginatedCategoriesResponse:
     """Get detailed category stats with volume and liquidity totals.
 
     Returns categories sorted by total 24h volume descending.
+    Supports pagination and search.
     """
     cats = await repo.get_categories_detailed(
         active_only=not include_closed,
         min_markets=min_markets,
     )
-    return [CategoryDetailResponse(**c) for c in cats]
+
+    # Filter by search if provided
+    if search:
+        search_lower = search.lower()
+        cats = [c for c in cats if search_lower in c["category"].lower()]
+
+    # Paginate
+    total = len(cats)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_items = cats[start:end]
+
+    return PaginatedCategoriesResponse(
+        items=[CategoryDetailResponse(**c) for c in page_items],
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
+    )
 
 
 @app.get("/api/events/{event_id}/markets")
