@@ -36,6 +36,12 @@ class ExitConfig:
     stop_loss: Decimal = Decimal("0.90")  # Exit at 90c
     min_hold_days: int = 7  # Minimum days before conditional exit applies
 
+    # G13: Slippage protection for exits (prevents catastrophic losses)
+    max_slippage_percent: Decimal = Decimal("0.10")  # Max 10% slippage from entry
+    max_spread_percent: Decimal = Decimal("0.20")  # Max 20% spread (bid-ask)
+    min_exit_price_floor: Decimal = Decimal("0.50")  # Never sell below 50% of entry
+    verify_liquidity: bool = True  # Enable liquidity verification for exits
+
 
 class ExitManager:
     """
@@ -249,15 +255,37 @@ class ExitManager:
                 )
                 return False, None
 
+            # G13: Verify liquidity and slippage before exit
+            # This prevents catastrophic losses from selling into illiquid markets
+            is_safe, safety_reason, safe_price = await self.verify_exit_liquidity(
+                position, current_price
+            )
+            if not is_safe:
+                logger.warning(
+                    f"G13: Exit blocked for {position.position_id}: {safety_reason}"
+                )
+                # Clear the claimed state since we're not proceeding
+                await self._position_tracker.clear_exit_pending(
+                    position.position_id,
+                    exit_status="liquidity_blocked",
+                )
+                return False, None
+
+            # Use the verified safe price (best bid) instead of the requested price
+            # This ensures we don't place limit orders above the best bid
+            actual_exit_price = safe_price if safe_price is not None else current_price
+
             # Submit sell order if client available
             if self._clob_client:
                 # py-clob-client requires OrderArgs object
                 from py_clob_client.clob_types import OrderArgs
 
+                # G13: Use verified safe price (best bid) for the limit order
+                # This ensures we sell at the actual market price, not a stale trigger price
                 order_args = OrderArgs(
                     token_id=position.token_id,
                     side="SELL",
-                    price=float(current_price),
+                    price=float(actual_exit_price),  # G13: Use verified price
                     size=float(position.size),
                 )
 
@@ -315,9 +343,10 @@ class ExitManager:
                         return False, order_id
 
             # Only close position after order confirmed (or no client)
+            # G13: Use actual_exit_price for accurate P&L tracking
             await self._position_tracker.close_position(
                 position.position_id,
-                exit_price=current_price,
+                exit_price=actual_exit_price,
                 reason=reason,
                 exit_order_id=order_id,
             )
@@ -677,6 +706,179 @@ class ExitManager:
                     logger.warning(f"Failed to cancel order {order_id}: {e}")
                     return False
         return False
+
+    async def verify_exit_liquidity(
+        self,
+        position: Position,
+        exit_price: Decimal,
+    ) -> Tuple[bool, str, Optional[Decimal]]:
+        """
+        G13: Verify sufficient liquidity and acceptable slippage before exit.
+
+        This prevents catastrophic losses like the Gold Cards bug where a position
+        at ~$0.96 was sold at $0.026 due to an illiquid orderbook with 99.8% spread.
+
+        Checks:
+        1. Orderbook has bids (market is not completely empty)
+        2. Spread is within acceptable limits (max_spread_percent)
+        3. Best bid is within slippage tolerance of expected price
+        4. Best bid is above minimum price floor (% of entry price)
+
+        Args:
+            position: Position to exit
+            exit_price: Expected exit price
+
+        Returns:
+            (is_safe, reason, safe_exit_price)
+            - is_safe: True if exit is safe to execute
+            - reason: Explanation if not safe
+            - safe_exit_price: The verified safe price to use (best bid)
+        """
+        if not self._config.verify_liquidity:
+            return True, "liquidity_check_disabled", exit_price
+
+        if not self._clob_client:
+            # No CLOB client = dry run, allow exit
+            return True, "dry_run", exit_price
+
+        try:
+            # Fetch orderbook
+            orderbook = await self._fetch_orderbook(position.token_id)
+            if not orderbook:
+                return False, "G13: Could not fetch orderbook", None
+
+            # Extract bids (buy orders we'd sell into)
+            bids = self._extract_bids(orderbook)
+            if not bids:
+                return False, "G13: No bids in orderbook - market is illiquid", None
+
+            # Get best bid (highest buy order)
+            best_bid = self._get_best_bid(bids)
+            if best_bid is None:
+                return False, "G13: Could not determine best bid", None
+
+            # Get best ask for spread calculation
+            asks = self._extract_asks(orderbook)
+            best_ask = self._get_best_ask(asks) if asks else None
+
+            # Check 1: Spread check (if we have both bid and ask)
+            if best_ask is not None:
+                spread = best_ask - best_bid
+                spread_percent = spread / best_ask if best_ask > 0 else Decimal("1")
+
+                if spread_percent > self._config.max_spread_percent:
+                    return (
+                        False,
+                        f"G13: Spread too wide ({spread_percent:.1%}) - "
+                        f"bid={best_bid}, ask={best_ask}, max={self._config.max_spread_percent:.0%}",
+                        None,
+                    )
+
+            # Check 2: Minimum price floor (% of entry price)
+            min_price_floor = position.entry_price * self._config.min_exit_price_floor
+            if best_bid < min_price_floor:
+                return (
+                    False,
+                    f"G13: Best bid ({best_bid}) below minimum floor ({min_price_floor}) - "
+                    f"entry was {position.entry_price}, floor is {self._config.min_exit_price_floor:.0%}",
+                    None,
+                )
+
+            # Check 3: Slippage from expected exit price
+            if exit_price > 0:
+                slippage = (exit_price - best_bid) / exit_price
+                if slippage > self._config.max_slippage_percent:
+                    return (
+                        False,
+                        f"G13: Slippage too high ({slippage:.1%}) - "
+                        f"expected {exit_price}, best_bid={best_bid}, max={self._config.max_slippage_percent:.0%}",
+                        None,
+                    )
+
+            logger.info(
+                f"G13: Exit liquidity verified for {position.position_id} - "
+                f"best_bid={best_bid}, exit_price={exit_price}"
+            )
+            return True, "liquidity_verified", best_bid
+
+        except Exception as e:
+            logger.error(f"G13: Error verifying exit liquidity: {e}")
+            return False, f"G13: Liquidity check failed: {e}", None
+
+    async def _fetch_orderbook(self, token_id: str) -> Optional[Any]:
+        """Fetch orderbook from CLOB client."""
+        if not self._clob_client:
+            return None
+
+        try:
+            import asyncio
+
+            # Try different method names for orderbook
+            for method_name in ("get_order_book", "get_orderbook", "orderbook"):
+                method = getattr(self._clob_client, method_name, None)
+                if method:
+                    import inspect
+                    if inspect.iscoroutinefunction(method):
+                        return await method(token_id)
+                    else:
+                        return await asyncio.to_thread(method, token_id)
+
+            logger.warning(f"G13: CLOB client has no orderbook method")
+            return None
+
+        except Exception as e:
+            logger.warning(f"G13: Error fetching orderbook: {e}")
+            return None
+
+    def _extract_bids(self, orderbook: Any) -> list:
+        """Extract bids from orderbook (handles object and dict formats)."""
+        if hasattr(orderbook, 'bids'):
+            return list(orderbook.bids) if orderbook.bids else []
+        if isinstance(orderbook, dict):
+            return orderbook.get('bids', [])
+        return []
+
+    def _extract_asks(self, orderbook: Any) -> list:
+        """Extract asks from orderbook (handles object and dict formats)."""
+        if hasattr(orderbook, 'asks'):
+            return list(orderbook.asks) if orderbook.asks else []
+        if isinstance(orderbook, dict):
+            return orderbook.get('asks', [])
+        return []
+
+    def _get_best_bid(self, bids: list) -> Optional[Decimal]:
+        """Get best (highest) bid price."""
+        if not bids:
+            return None
+
+        try:
+            prices = []
+            for bid in bids:
+                if hasattr(bid, 'price'):
+                    prices.append(Decimal(str(bid.price)))
+                elif isinstance(bid, dict) and 'price' in bid:
+                    prices.append(Decimal(str(bid['price'])))
+
+            return max(prices) if prices else None
+        except Exception:
+            return None
+
+    def _get_best_ask(self, asks: list) -> Optional[Decimal]:
+        """Get best (lowest) ask price."""
+        if not asks:
+            return None
+
+        try:
+            prices = []
+            for ask in asks:
+                if hasattr(ask, 'price'):
+                    prices.append(Decimal(str(ask.price)))
+                elif isinstance(ask, dict) and 'price' in ask:
+                    prices.append(Decimal(str(ask['price'])))
+
+            return min(prices) if prices else None
+        except Exception:
+            return None
 
     async def evaluate_all_positions(
         self,

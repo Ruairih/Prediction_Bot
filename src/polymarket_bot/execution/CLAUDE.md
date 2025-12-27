@@ -1,7 +1,10 @@
 # Execution Layer - CLAUDE.md
 
 > **STATUS: IMPLEMENTED**
-> The execution layer is now implemented with critical G4 protections and safety fixes.
+> The execution layer is now implemented with critical safety protections:
+> - G4: Balance cache refresh after fills
+> - G13: Exit slippage protection (Gold Cards bug fix)
+> - G14: Pre-entry liquidity verification and stale order cleanup (Dead Orders bug fix)
 
 ## Purpose
 
@@ -893,6 +896,64 @@ def test_exit_strategy_capital_efficiency():
 
     # Should apply conditional exit
     assert exit_manager.get_strategy(long_position) == "conditional_exit"
+```
+
+### 4. G13: Exit Slippage Protection ("Gold Cards Bug")
+```python
+def test_exit_liquidity_verification():
+    """
+    GOTCHA: Markets can become illiquid after entry.
+
+    The Gold Cards bug sold at $0.026 instead of $0.96 because
+    the exit logic didn't verify orderbook liquidity.
+
+    ExitManager now verifies:
+    - Orderbook has bids (not empty)
+    - Spread < 20%
+    - Best bid > 50% of entry price
+    - Slippage < 10%
+    """
+    # This exit should be BLOCKED - spread is 99.8%
+    mock_orderbook = {"bids": [{"price": "0.001"}], "asks": [{"price": "0.999"}]}
+
+    is_safe, reason, price = await exit_manager.verify_exit_liquidity(
+        position, exit_price=Decimal("0.96")
+    )
+
+    assert is_safe is False
+    assert "spread too wide" in reason or "below minimum floor" in reason
+```
+
+### 5. G14: Pre-Entry Liquidity Verification ("Dead Orders Bug")
+```python
+def test_entry_liquidity_verification():
+    """
+    GOTCHA: Orders in illiquid markets lock capital indefinitely.
+
+    The Dead Orders bug locked $152 in 8 orders with 99.9% spreads.
+    Orders could never fill (ask $0.999 > order $0.95).
+
+    ExecutionService now:
+    - Verifies spread < 30% before placing orders
+    - Checks fillability (ask <= order price for BUY)
+    - Periodically cancels stale unfillable orders
+    """
+    # This entry should be BLOCKED - spread is 99.9%
+    mock_orderbook = {"bids": [{"price": "0.001"}], "asks": [{"price": "0.999"}]}
+
+    is_valid, reason = await service.verify_entry_liquidity(
+        token_id="tok_dead_market",
+        side="BUY",
+        price=Decimal("0.95"),
+    )
+
+    assert is_valid is False
+    assert "spread too wide" in reason or "unfillable" in reason
+
+    # Stale order cleanup
+    result = await service.cancel_stale_orders()
+    assert result["cancelled"] > 0
+    assert result["freed_capital"] > Decimal("0")
 ```
 
 ## Running Tests

@@ -21,6 +21,8 @@ This module provides:
 Critical Gotchas Handled:
     - G4: CLOB Balance Cache Staleness - Refresh after every fill
     - G5: Orderbook Verification - Called before submitting orders
+    - G13: Exit Slippage Protection - Verify liquidity before exits (Gold Cards bug)
+    - G14: Entry Liquidity Verification - Check spread before orders (Dead Orders bug)
 
 Exit Strategy Logic:
     - Short positions (<7 days): Hold to resolution (99%+ win rate)

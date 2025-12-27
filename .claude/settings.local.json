@@ -39,7 +39,13 @@
       "Bash(psql:*)",
       "mcp__codex__codex",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(apt-cache search:*)",
+      "Bash(getent hosts:*)",
+      "Bash(ping:*)",
+      "Bash(ip route:*)",
+      "Bash(chmod:*)",
+      "Bash(tailscale status:*)"
     ]
   }
 }

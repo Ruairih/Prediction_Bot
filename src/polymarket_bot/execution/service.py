@@ -59,6 +59,14 @@ class ExecutionConfig:
     sync_positions_on_startup: bool = True
     startup_sync_hold_policy: str = "new"  # "new", "mature", or "actual"
 
+    # G14: Stale Order Management - Capital Efficiency
+    # See docs/reference/known_gotchas.md#g14-stale-order-capital-lock
+    stale_order_max_spread: Decimal = Decimal("0.50")  # Cancel if spread > 50%
+    stale_order_max_age_hours: float = 4.0  # Cancel if order > 4 hours old AND illiquid
+    stale_order_min_age_hours: float = 1.0  # Don't cancel orders younger than 1 hour
+    verify_entry_liquidity: bool = True  # G14: Check liquidity before placing orders
+    entry_max_spread: Decimal = Decimal("0.30")  # Max 30% spread for new orders
+
     @property
     def order_config(self) -> OrderConfig:
         """Get order configuration."""
@@ -370,12 +378,13 @@ class ExecutionService:
         Execute an entry signal.
 
         Handles:
-        1. Price validation
-        2. Balance check/reservation
-        3. Order submission
-        4. Order sync (optional wait for fill)
-        5. Position creation
-        6. Balance refresh (G4)
+        1. G14: Pre-entry liquidity verification
+        2. Price validation
+        3. Balance check/reservation
+        4. Order submission
+        5. Order sync (optional wait for fill)
+        6. Position creation
+        7. Balance refresh (G4)
 
         Args:
             signal: Entry signal from strategy
@@ -385,6 +394,20 @@ class ExecutionService:
             ExecutionResult with order_id and position_id on success
         """
         try:
+            # G14: Verify liquidity before placing order
+            is_liquid, reason = await self.verify_entry_liquidity(
+                token_id=signal.token_id,
+                side=signal.side,
+                price=signal.price,
+            )
+            if not is_liquid:
+                logger.warning(f"G14: Rejecting entry - {reason}")
+                return ExecutionResult(
+                    success=False,
+                    error=f"Insufficient liquidity: {reason}",
+                    error_type="insufficient_liquidity",
+                )
+
             # Submit order (includes price and balance validation)
             order_id = await self._order_manager.submit_order(
                 token_id=signal.token_id,
@@ -755,3 +778,243 @@ class ExecutionService:
     def get_position_by_token(self, token_id: str) -> Optional[Position]:
         """Get position for a token."""
         return self._position_tracker.get_position_by_token(token_id)
+
+    # =========================================================================
+    # G14: Stale Order Management - Capital Efficiency
+    # =========================================================================
+
+    async def cancel_stale_orders(self) -> dict:
+        """
+        G14: Cancel stale orders that are unlikely to fill.
+
+        Identifies and cancels orders where:
+        1. Spread is too wide (> stale_order_max_spread)
+        2. Order cannot fill (BUY price < best ask)
+        3. Order is old enough (> stale_order_min_age_hours)
+
+        This prevents capital from being locked in dead markets.
+
+        Returns:
+            Dict with 'cancelled', 'checked', 'freed_capital', 'details'
+        """
+        if not self._clob_client:
+            logger.debug("cancel_stale_orders: No CLOB client, skipping")
+            return {"cancelled": 0, "checked": 0, "freed_capital": Decimal("0"), "details": []}
+
+        open_orders = self._order_manager.get_open_orders()
+        if not open_orders:
+            return {"cancelled": 0, "checked": 0, "freed_capital": Decimal("0"), "details": []}
+
+        now = datetime.now(timezone.utc)
+        cancelled = 0
+        checked = 0
+        freed_capital = Decimal("0")
+        details = []
+
+        for order in open_orders:
+            checked += 1
+
+            # Skip orders that are too young
+            if order.created_at:
+                age_hours = (now - order.created_at).total_seconds() / 3600
+                if age_hours < self._config.stale_order_min_age_hours:
+                    logger.debug(f"Order {order.order_id[:16]}... too young ({age_hours:.1f}h)")
+                    continue
+
+            try:
+                # Check orderbook liquidity
+                is_stale, reason, spread = await self._check_order_staleness(order)
+
+                if is_stale:
+                    # Calculate locked capital before cancelling
+                    unfilled = order.size - order.filled_size
+                    locked = order.price * unfilled
+
+                    success = await self._order_manager.cancel_order(order.order_id)
+                    if success:
+                        cancelled += 1
+                        freed_capital += locked
+                        details.append({
+                            "order_id": order.order_id,
+                            "token_id": order.token_id,
+                            "reason": reason,
+                            "spread": str(spread) if spread else None,
+                            "freed": str(locked),
+                            "age_hours": age_hours if order.created_at else None,
+                        })
+                        logger.info(
+                            f"G14: Cancelled stale order {order.order_id[:16]}... "
+                            f"({reason}, freed ${locked:.2f})"
+                        )
+                        self._emit_event({
+                            "type": "order",
+                            "action": "cancelled_stale",
+                            "order_id": order.order_id,
+                            "reason": reason,
+                            "freed_capital": str(locked),
+                        })
+
+            except Exception as e:
+                logger.warning(f"Error checking order {order.order_id[:16]}...: {e}")
+
+        if cancelled > 0:
+            logger.info(
+                f"G14: Cancelled {cancelled} stale orders, freed ${freed_capital:.2f}"
+            )
+
+        return {
+            "cancelled": cancelled,
+            "checked": checked,
+            "freed_capital": freed_capital,
+            "details": details,
+        }
+
+    async def _check_order_staleness(
+        self,
+        order: Order,
+    ) -> tuple[bool, str, Optional[Decimal]]:
+        """
+        Check if an order is stale and should be cancelled.
+
+        Returns:
+            (is_stale, reason, spread_percent)
+        """
+        try:
+            ob = self._clob_client.get_order_book(order.token_id)
+
+            # Extract bids and asks (handle both dict and object formats)
+            if isinstance(ob, dict):
+                bids = ob.get("bids", [])
+                asks = ob.get("asks", [])
+            else:
+                bids = ob.bids if hasattr(ob, "bids") and ob.bids else []
+                asks = ob.asks if hasattr(ob, "asks") and ob.asks else []
+
+            # Get best prices
+            if bids:
+                if isinstance(bids[0], dict):
+                    best_bid = Decimal(str(bids[0].get("price", 0)))
+                else:
+                    best_bid = Decimal(str(bids[0].price))
+            else:
+                best_bid = Decimal("0")
+
+            if asks:
+                if isinstance(asks[0], dict):
+                    best_ask = Decimal(str(asks[0].get("price", 0)))
+                else:
+                    best_ask = Decimal(str(asks[0].price))
+            else:
+                best_ask = Decimal("1")
+
+            # Calculate spread
+            if best_ask > 0:
+                spread = (best_ask - best_bid) / best_ask
+            else:
+                spread = Decimal("1")
+
+            spread_pct = spread * 100
+
+            # Check conditions for staleness
+            # 1. BUY order can never fill if best ask > order price
+            if order.side == "BUY" and best_ask > order.price:
+                return True, f"unfillable (ask ${best_ask} > order ${order.price})", spread_pct
+
+            # 2. SELL order can never fill if best bid < order price
+            if order.side == "SELL" and best_bid < order.price:
+                return True, f"unfillable (bid ${best_bid} < order ${order.price})", spread_pct
+
+            # 3. Spread too wide
+            if spread > self._config.stale_order_max_spread:
+                return True, f"spread too wide ({spread_pct:.1f}%)", spread_pct
+
+            return False, "", spread_pct
+
+        except Exception as e:
+            logger.warning(f"Error checking orderbook for {order.token_id[:20]}...: {e}")
+            return False, "", None
+
+    async def verify_entry_liquidity(
+        self,
+        token_id: str,
+        side: str,
+        price: Decimal,
+    ) -> tuple[bool, str]:
+        """
+        G14: Verify sufficient liquidity before placing an order.
+
+        Checks:
+        1. Orderbook has liquidity on both sides
+        2. Spread is within acceptable range
+        3. Order is fillable (for BUY: ask <= price, for SELL: bid >= price)
+
+        Args:
+            token_id: Token to check
+            side: "BUY" or "SELL"
+            price: Order price
+
+        Returns:
+            (is_valid, reason_if_invalid)
+        """
+        if not self._clob_client:
+            return True, ""  # Allow in dry run
+
+        if not self._config.verify_entry_liquidity:
+            return True, ""
+
+        try:
+            ob = self._clob_client.get_order_book(token_id)
+
+            # Extract bids and asks
+            if isinstance(ob, dict):
+                bids = ob.get("bids", [])
+                asks = ob.get("asks", [])
+            else:
+                bids = ob.bids if hasattr(ob, "bids") and ob.bids else []
+                asks = ob.asks if hasattr(ob, "asks") and ob.asks else []
+
+            # Check liquidity exists
+            if not bids and not asks:
+                return False, "no liquidity (empty orderbook)"
+
+            # Get best prices
+            if bids:
+                if isinstance(bids[0], dict):
+                    best_bid = Decimal(str(bids[0].get("price", 0)))
+                else:
+                    best_bid = Decimal(str(bids[0].price))
+            else:
+                best_bid = Decimal("0")
+
+            if asks:
+                if isinstance(asks[0], dict):
+                    best_ask = Decimal(str(asks[0].get("price", 0)))
+                else:
+                    best_ask = Decimal(str(asks[0].price))
+            else:
+                best_ask = Decimal("1")
+
+            # Calculate spread
+            if best_ask > 0:
+                spread = (best_ask - best_bid) / best_ask
+            else:
+                spread = Decimal("1")
+
+            # Check spread
+            if spread > self._config.entry_max_spread:
+                return False, f"spread too wide ({spread * 100:.1f}% > {self._config.entry_max_spread * 100}%)"
+
+            # Check fillability
+            side = side.upper()
+            if side == "BUY" and best_ask > price:
+                return False, f"unfillable BUY (ask ${best_ask} > order ${price})"
+
+            if side == "SELL" and best_bid < price:
+                return False, f"unfillable SELL (bid ${best_bid} < order ${price})"
+
+            return True, ""
+
+        except Exception as e:
+            logger.warning(f"G14: Error verifying liquidity for {token_id[:20]}...: {e}")
+            # Fail open - don't block on errors
+            return True, ""

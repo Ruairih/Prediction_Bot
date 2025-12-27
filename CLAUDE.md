@@ -313,6 +313,44 @@ def _to_naive_utc(dt: Optional[datetime]) -> Optional[datetime]:
 # Startup: ~2s instead of 30+s
 ```
 
+### G13: Exit Slippage Disaster ("Gold Cards Bug")
+
+| | |
+|---|---|
+| **What** | Exit order sold at $0.026 instead of ~$0.96 due to 99.8% spread in illiquid market |
+| **Impact** | Lost ~$31 on single trade (97% loss instead of 4% profit) |
+| **Affects** | execution |
+| **Rule** | **ALWAYS verify orderbook liquidity before exits. Block if spread >20% or best bid <50% of entry** |
+
+```python
+# Before executing exit:
+is_safe, reason, safe_price = await exit_manager.verify_exit_liquidity(
+    position, exit_price
+)
+if not is_safe:
+    logger.warning(f"G13: Exit blocked: {reason}")
+    return  # Don't sell into illiquid market
+```
+
+### G14: Stale Order Capital Lock ("Dead Orders Bug")
+
+| | |
+|---|---|
+| **What** | Orders in illiquid markets (99.9% spread) locked capital indefinitely |
+| **Impact** | $152 frozen in 8 unfillable orders, only $10 available for trading |
+| **Affects** | execution |
+| **Rule** | **Verify liquidity before entries (spread <30%). Cancel stale orders that can't fill** |
+
+```python
+# Before placing order:
+is_liquid, reason = await service.verify_entry_liquidity(token_id, side, price)
+if not is_liquid:
+    return  # Don't place order in dead market
+
+# Periodically cancel stale orders:
+result = await service.cancel_stale_orders()  # Frees locked capital
+```
+
 ---
 
 ## Testing Philosophy

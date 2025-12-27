@@ -1009,3 +1009,455 @@ class TestAtomicExitClaiming:
         # Position should still be pending
         assert position.exit_pending is True
         assert position.exit_status == "claiming"
+
+
+class TestG13SlippageProtection:
+    """
+    G13: Slippage and Liquidity Protection for Exits.
+
+    CRITICAL FIX: Prevents catastrophic losses like the Gold Cards bug where
+    a position at ~$0.96 was sold at $0.026 due to an illiquid orderbook
+    with 99.8% spread.
+
+    These tests verify that exits are blocked when:
+    1. Market has no bids (completely illiquid)
+    2. Spread is too wide (> 20% default)
+    3. Best bid is below minimum price floor (< 50% of entry)
+    4. Slippage from expected price is too high (> 10% default)
+    """
+
+    @pytest.mark.asyncio
+    async def test_blocks_exit_when_no_bids(
+        self, mock_db, mock_clob_client, position_tracker
+    ):
+        """
+        G13: Should block exit when orderbook has no bids.
+
+        Empty bid side means no one is willing to buy - selling would get $0.
+        """
+        # Mock orderbook with no bids
+        mock_clob_client.get_order_book.return_value = {
+            "bids": [],
+            "asks": [{"price": "0.99", "size": "100"}],
+        }
+
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+        )
+
+        position = Position(
+            position_id="pos_nobid",
+            token_id="tok_nobid",
+            condition_id="0xnobid",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+        position_tracker.positions[position.position_id] = position
+
+        # Verify liquidity check fails
+        is_safe, reason, _ = await manager.verify_exit_liquidity(
+            position, Decimal("0.99")
+        )
+
+        assert is_safe is False
+        assert "No bids" in reason or "illiquid" in reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_blocks_exit_when_spread_too_wide(
+        self, mock_db, mock_clob_client, position_tracker
+    ):
+        """
+        G13: Should block exit when bid-ask spread is too wide.
+
+        Wide spread indicates illiquid market where we'd sell at a huge discount.
+        Default max spread is 20%.
+        """
+        # Mock orderbook with 99% spread (bid: 0.01, ask: 0.99)
+        mock_clob_client.get_order_book.return_value = {
+            "bids": [{"price": "0.01", "size": "100"}],  # Terrible bid
+            "asks": [{"price": "0.99", "size": "100"}],
+        }
+
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+        )
+
+        position = Position(
+            position_id="pos_spread",
+            token_id="tok_spread",
+            condition_id="0xspread",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+
+        is_safe, reason, _ = await manager.verify_exit_liquidity(
+            position, Decimal("0.99")
+        )
+
+        assert is_safe is False
+        assert "Spread too wide" in reason or "spread" in reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_blocks_exit_below_price_floor(
+        self, mock_db, mock_clob_client, position_tracker
+    ):
+        """
+        G13: Should block exit when best bid is below minimum price floor.
+
+        Default floor is 50% of entry price. If we entered at 0.95, we should
+        never sell below 0.475.
+        """
+        # Mock orderbook with bid way below entry price
+        mock_clob_client.get_order_book.return_value = {
+            "bids": [{"price": "0.10", "size": "100"}],  # 10c bid vs 95c entry
+            "asks": [{"price": "0.12", "size": "100"}],  # Reasonable spread
+        }
+
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+        )
+
+        position = Position(
+            position_id="pos_floor",
+            token_id="tok_floor",
+            condition_id="0xfloor",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),  # Entered at 95c
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+
+        is_safe, reason, _ = await manager.verify_exit_liquidity(
+            position, Decimal("0.99")
+        )
+
+        assert is_safe is False
+        assert "floor" in reason.lower() or "below minimum" in reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_blocks_exit_with_high_slippage(
+        self, mock_db, mock_clob_client, position_tracker
+    ):
+        """
+        G13: Should block exit when slippage from expected price is too high.
+
+        Default max slippage is 10%. If expected exit is 0.99 and best bid
+        is 0.85, that's >10% slippage.
+        """
+        # Mock orderbook with bid 15% below expected exit
+        mock_clob_client.get_order_book.return_value = {
+            "bids": [{"price": "0.84", "size": "100"}],  # 84c vs expected 99c
+            "asks": [{"price": "0.86", "size": "100"}],
+        }
+
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+        )
+
+        position = Position(
+            position_id="pos_slip",
+            token_id="tok_slip",
+            condition_id="0xslip",
+            size=Decimal("20"),
+            entry_price=Decimal("0.80"),  # Low entry so floor check passes
+            entry_cost=Decimal("16.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+
+        is_safe, reason, _ = await manager.verify_exit_liquidity(
+            position, Decimal("0.99")  # Expected at 99c
+        )
+
+        assert is_safe is False
+        assert "Slippage too high" in reason or "slippage" in reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_allows_exit_with_good_liquidity(
+        self, mock_db, mock_clob_client, position_tracker
+    ):
+        """
+        G13: Should allow exit when liquidity is good.
+
+        All checks pass: bids exist, spread is narrow, bid is above floor,
+        slippage is acceptable.
+        """
+        # Mock healthy orderbook
+        mock_clob_client.get_order_book.return_value = {
+            "bids": [{"price": "0.98", "size": "100"}],  # Good bid
+            "asks": [{"price": "0.99", "size": "100"}],  # 1% spread
+        }
+
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+        )
+
+        position = Position(
+            position_id="pos_good",
+            token_id="tok_good",
+            condition_id="0xgood",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+
+        is_safe, reason, safe_price = await manager.verify_exit_liquidity(
+            position, Decimal("0.99")
+        )
+
+        assert is_safe is True
+        assert safe_price == Decimal("0.98")  # Should return best bid
+
+    @pytest.mark.asyncio
+    async def test_execute_exit_uses_verified_price(
+        self, mock_db, mock_clob_client, position_tracker
+    ):
+        """
+        G13: Exit should use verified safe price (best bid), not requested price.
+
+        This ensures we place limit orders at the actual market price.
+        """
+        # Mock healthy orderbook with bid at 0.97
+        mock_clob_client.get_order_book.return_value = {
+            "bids": [{"price": "0.97", "size": "100"}],
+            "asks": [{"price": "0.98", "size": "100"}],
+        }
+        mock_db.fetchval.return_value = 1  # Claim succeeds
+
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+        )
+
+        position = Position(
+            position_id="pos_price",
+            token_id="tok_price",
+            condition_id="0xprice",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+        position_tracker.positions[position.position_id] = position
+
+        await manager.execute_exit(
+            position,
+            current_price=Decimal("0.99"),  # Requested at 99c
+            reason="profit_target",
+        )
+
+        # Should have submitted order at best bid (0.97), not requested (0.99)
+        call_args = mock_clob_client.create_and_post_order.call_args
+        if call_args:
+            order_args = call_args[0][0]
+            assert float(order_args.price) == 0.97
+
+    @pytest.mark.asyncio
+    async def test_execute_exit_blocked_by_liquidity_check(
+        self, mock_db, mock_clob_client, position_tracker
+    ):
+        """
+        G13: Exit should be blocked entirely if liquidity check fails.
+        """
+        # Mock illiquid orderbook
+        mock_clob_client.get_order_book.return_value = {
+            "bids": [{"price": "0.01", "size": "100"}],  # Terrible bid
+            "asks": [{"price": "0.99", "size": "100"}],  # Huge spread
+        }
+        mock_db.fetchval.return_value = 1  # Claim succeeds
+
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+        )
+
+        position = Position(
+            position_id="pos_blocked",
+            token_id="tok_blocked",
+            condition_id="0xblocked",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+        position_tracker.positions[position.position_id] = position
+
+        success, order_id = await manager.execute_exit(
+            position,
+            current_price=Decimal("0.99"),
+            reason="profit_target",
+        )
+
+        # Should be blocked - no order submitted
+        assert success is False
+        mock_clob_client.create_and_post_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_liquidity_check_disabled_allows_exit(
+        self, mock_db, mock_clob_client, position_tracker
+    ):
+        """
+        G13: If verify_liquidity=False in config, exit proceeds without check.
+        """
+        config = ExitConfig(verify_liquidity=False)
+
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+            config=config,
+        )
+
+        position = Position(
+            position_id="pos_nocheck",
+            token_id="tok_nocheck",
+            condition_id="0xnocheck",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+
+        is_safe, reason, safe_price = await manager.verify_exit_liquidity(
+            position, Decimal("0.99")
+        )
+
+        assert is_safe is True
+        assert "disabled" in reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_dry_run_bypasses_liquidity_check(
+        self, mock_db, position_tracker
+    ):
+        """
+        G13: Dry run mode (no CLOB client) should bypass liquidity check.
+        """
+        # No CLOB client = dry run
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=None,
+            position_tracker=position_tracker,
+        )
+
+        position = Position(
+            position_id="pos_dry",
+            token_id="tok_dry",
+            condition_id="0xdry",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+
+        is_safe, reason, _ = await manager.verify_exit_liquidity(
+            position, Decimal("0.99")
+        )
+
+        assert is_safe is True
+        assert "dry_run" in reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_gold_cards_scenario_would_be_blocked(
+        self, mock_db, mock_clob_client, position_tracker
+    ):
+        """
+        REGRESSION TEST: Gold Cards bug scenario.
+
+        The actual bug:
+        - Position at entry ~$0.915
+        - Market became illiquid: Bid $0.001, Ask $0.999 (99.8% spread)
+        - Bot sold at $0.026 causing ~$31 loss
+
+        With G9 protection, this exit would be BLOCKED.
+        """
+        # Replicate the Gold Cards illiquid orderbook
+        mock_clob_client.get_order_book.return_value = {
+            "bids": [{"price": "0.001", "size": "100"}],  # Bid at 0.1c
+            "asks": [{"price": "0.999", "size": "100"}],  # Ask at 99.9c
+        }
+
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+        )
+
+        position = Position(
+            position_id="pos_gold",
+            token_id="95197758690536781344967069481835822467121525130144169973322994558549635662278",
+            condition_id="0xgoldcards",
+            size=Decimal("40"),  # 40 shares like the real trade
+            entry_price=Decimal("0.915"),  # Entered at ~91.5c
+            entry_cost=Decimal("36.60"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+
+        is_safe, reason, _ = await manager.verify_exit_liquidity(
+            position, Decimal("0.96")  # Expected exit around 96c
+        )
+
+        assert is_safe is False
+        # Should fail on spread check (99.8% spread >> 20% max)
+        assert "Spread too wide" in reason or "spread" in reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_handles_orderbook_object_format(
+        self, mock_db, mock_clob_client, position_tracker
+    ):
+        """
+        G13: Should handle orderbook returned as object (not dict).
+
+        py-clob-client may return OrderBookSummary object with .bids/.asks
+        attributes instead of dict with ["bids"]/["asks"] keys.
+        """
+        # Mock orderbook as object with attributes
+        class OrderLevel:
+            def __init__(self, price, size):
+                self.price = price
+                self.size = size
+
+        class OrderBookSummary:
+            def __init__(self):
+                self.bids = [OrderLevel("0.97", "100")]
+                self.asks = [OrderLevel("0.98", "100")]
+
+        mock_clob_client.get_order_book.return_value = OrderBookSummary()
+
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+        )
+
+        position = Position(
+            position_id="pos_obj",
+            token_id="tok_obj",
+            condition_id="0xobj",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+
+        is_safe, reason, safe_price = await manager.verify_exit_liquidity(
+            position, Decimal("0.99")
+        )
+
+        assert is_safe is True
+        assert safe_price == Decimal("0.97")

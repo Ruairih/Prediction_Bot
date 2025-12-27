@@ -67,7 +67,17 @@ def mock_clob_client():
         def cancel_order(self, order_id):
             pass
 
+        def get_order_book(self, token_id):
+            """G13: Orderbook for liquidity verification."""
+            pass
+
     client = MagicMock(spec=CLOBClientSpec)
+
+    # G13: Default healthy orderbook for exit liquidity checks
+    client.get_order_book.return_value = {
+        "bids": [{"price": "0.98", "size": "100"}],
+        "asks": [{"price": "0.99", "size": "100"}],
+    }
 
     # Mock successful order creation
     client.create_and_post_order.return_value = {

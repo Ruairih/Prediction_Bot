@@ -615,6 +615,219 @@ Quick sync: updated 0 sizes, closed 4 missing positions
 
 ---
 
+## G13: Exit Slippage Disaster ("Gold Cards Bug")
+
+**What happened:** A position at ~$0.915 entry price was sold at $0.026 instead of the expected ~$0.96, causing a ~$31 loss on a single trade.
+
+**Root cause:** The exit logic placed SELL orders without verifying:
+1. Market liquidity (orderbook had bids)
+2. Bid-ask spread (was 99.8%: bid $0.001, ask $0.999)
+3. Slippage from expected price
+4. Minimum acceptable exit price
+
+The market became extremely illiquid after entry. When an exit trigger fired (stop loss or profit target), the bot placed a limit sell at the trigger price without checking if anyone was actually bidding near that price.
+
+**Impact:**
+- Sold 35 shares at $0.026 instead of ~$0.96
+- Lost ~$31 on a single trade ($36.60 entry → $0.91 exit)
+- 97% loss when expecting ~4% profit
+
+**Fix:** Added G13 slippage protection in `exit_manager.py`:
+
+```python
+@dataclass
+class ExitConfig:
+    # G13: Slippage protection for exits
+    max_slippage_percent: Decimal = Decimal("0.10")  # Max 10% slippage
+    max_spread_percent: Decimal = Decimal("0.20")  # Max 20% spread
+    min_exit_price_floor: Decimal = Decimal("0.50")  # Never below 50% of entry
+    verify_liquidity: bool = True  # Enable liquidity verification
+
+async def verify_exit_liquidity(self, position, exit_price) -> tuple[bool, str, Decimal]:
+    """
+    Verify sufficient liquidity before exit.
+
+    Checks:
+    1. Orderbook has bids (market not empty)
+    2. Spread is within limits (< 20%)
+    3. Best bid above floor (> 50% of entry)
+    4. Slippage acceptable (< 10%)
+    """
+    orderbook = await self._fetch_orderbook(position.token_id)
+
+    # No bids = completely illiquid
+    if not bids:
+        return False, "G13: No bids in orderbook", None
+
+    # Spread check
+    spread_percent = (best_ask - best_bid) / best_ask
+    if spread_percent > 0.20:
+        return False, f"G13: Spread too wide ({spread_percent:.1%})", None
+
+    # Floor check
+    min_price_floor = position.entry_price * Decimal("0.50")
+    if best_bid < min_price_floor:
+        return False, f"G13: Below minimum floor", None
+
+    # Slippage check
+    slippage = (exit_price - best_bid) / exit_price
+    if slippage > 0.10:
+        return False, f"G13: Slippage too high ({slippage:.1%})", None
+
+    return True, "liquidity_verified", best_bid
+
+async def execute_exit(self, position, current_price, reason):
+    # G13: Verify liquidity before exit
+    is_safe, reason, safe_price = await self.verify_exit_liquidity(
+        position, current_price
+    )
+    if not is_safe:
+        logger.warning(f"G13: Exit blocked: {reason}")
+        await self._position_tracker.clear_exit_pending(
+            position.position_id, exit_status="liquidity_blocked"
+        )
+        return False, None
+
+    # Use verified safe price (best bid) instead of trigger price
+    order_args = OrderArgs(
+        price=float(safe_price),  # Not current_price!
+        ...
+    )
+```
+
+**What would have happened with G13:**
+- Bot checks orderbook: bid $0.001, ask $0.999
+- Spread = 99.8% > 20% max → **EXIT BLOCKED**
+- Also: bid $0.001 < floor $0.457 (50% of $0.915) → **EXIT BLOCKED**
+- Position stays open, no catastrophic loss
+
+**Thresholds (configurable via ExitConfig):**
+| Check | Default | Rationale |
+|-------|---------|-----------|
+| Max slippage | 10% | Tolerate some slippage, but not catastrophic |
+| Max spread | 20% | Wide spreads indicate danger |
+| Min price floor | 50% of entry | Never lose more than 50% per position |
+
+**Key lesson:** Entry logic has G5 orderbook verification. Exit logic needs equivalent protection because markets can become illiquid after entry.
+
+**Affected components:** execution/exit_manager
+
+---
+
+## G14: Stale Order Capital Lock ("Dead Orders Bug")
+
+**What happened:** 8 BUY orders at $0.95 each ($152 total) were locked in markets with 99.9% spreads (bid $0.001, ask $0.999). The orders could NEVER fill because the ask ($0.999) was above our limit ($0.95), yet the capital remained reserved indefinitely. Only $10 was available for new trades while $152 sat frozen in dead markets.
+
+**Root cause:** Two failures:
+1. **No pre-entry liquidity check:** Orders were placed in markets without verifying spread or fillability
+2. **No stale order cleanup:** Orders that became unfillable were never cancelled
+
+When a market becomes illiquid after order placement (spreads widen, liquidity evaporates), the bot had no mechanism to detect this and free up the locked capital.
+
+**Impact:**
+- $152 locked in unfillable orders (93% of capital)
+- Only $10 available for new trades
+- Orders sitting 12-14 hours with 0 fills
+- Capital efficiency collapsed
+
+**Fix:** Added G14 capital efficiency protections in `service.py`:
+
+```python
+@dataclass
+class ExecutionConfig:
+    # G14: Stale Order Management - Capital Efficiency
+    stale_order_max_spread: Decimal = Decimal("0.50")  # Cancel if spread > 50%
+    stale_order_max_age_hours: float = 4.0  # Cancel if order > 4 hours old AND illiquid
+    stale_order_min_age_hours: float = 1.0  # Don't cancel orders younger than 1 hour
+    verify_entry_liquidity: bool = True  # Check liquidity before placing orders
+    entry_max_spread: Decimal = Decimal("0.30")  # Max 30% spread for new orders
+
+async def cancel_stale_orders(self) -> dict:
+    """
+    G14: Cancel stale orders that are unlikely to fill.
+
+    Identifies and cancels orders where:
+    1. Spread is too wide (> stale_order_max_spread)
+    2. Order cannot fill (BUY price < best ask)
+    3. Order is old enough (> stale_order_min_age_hours)
+    """
+    for order in open_orders:
+        # Skip orders too young
+        if age_hours < stale_order_min_age_hours:
+            continue
+
+        # Check if order can fill
+        orderbook = get_order_book(order.token_id)
+        if order.side == "BUY" and best_ask > order.price:
+            # Order can NEVER fill - cancel it
+            cancel_order(order.order_id)
+            freed_capital += order.price * unfilled_size
+
+        # Check spread
+        if spread > stale_order_max_spread:
+            cancel_order(order.order_id)
+
+async def verify_entry_liquidity(self, token_id, side, price) -> tuple[bool, str]:
+    """
+    G14: Verify sufficient liquidity before placing an order.
+
+    Prevents placing orders in dead markets.
+    """
+    orderbook = get_order_book(token_id)
+
+    # Check spread
+    spread = (best_ask - best_bid) / best_ask
+    if spread > entry_max_spread:
+        return False, f"spread too wide ({spread:.1%})"
+
+    # Check fillability
+    if side == "BUY" and best_ask > price:
+        return False, f"unfillable BUY (ask ${best_ask} > order ${price})"
+
+    return True, ""
+
+async def execute_entry(self, signal, context):
+    # G14: Verify liquidity before placing order
+    is_liquid, reason = await self.verify_entry_liquidity(
+        token_id=signal.token_id,
+        side=signal.side,
+        price=signal.price,
+    )
+    if not is_liquid:
+        return ExecutionResult(
+            success=False,
+            error=f"Insufficient liquidity: {reason}",
+            error_type="insufficient_liquidity",
+        )
+```
+
+**What would have happened with G14:**
+
+*Pre-entry check (if enabled at time of order):*
+- Bot checks orderbook: bid $0.001, ask $0.999
+- Spread = 99.9% > 30% max → **ORDER BLOCKED**
+- Order never placed, capital never locked
+
+*Stale order cleanup (catches orders that became stale):*
+- Bot checks each open order's orderbook
+- Order at $0.95, best ask at $0.999 → **UNFILLABLE**
+- Order cancelled, $19 freed per order
+- All 8 orders cancelled → $152 freed
+
+**Thresholds (configurable via ExecutionConfig):**
+| Check | Default | Rationale |
+|-------|---------|-----------|
+| Entry max spread | 30% | Reasonable liquidity for fills |
+| Stale order max spread | 50% | More lenient for existing orders |
+| Stale order min age | 1 hour | Give orders time to fill |
+| Stale order max age | 4 hours | Consider cancellation after this |
+
+**Key lesson:** G13 protects exits from illiquid markets. G14 protects entries AND cancels stale orders. Together they form a complete liquidity protection framework.
+
+**Affected components:** execution/service
+
+---
+
 ## Adding New Gotchas
 
 When you discover a new production bug:

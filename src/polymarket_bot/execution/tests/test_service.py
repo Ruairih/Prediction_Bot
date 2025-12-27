@@ -64,6 +64,13 @@ def mock_clob_client():
         "avgPrice": "0.95",
     }
     client.cancel_order.return_value = {"success": True}
+    client.cancel.return_value = {"success": True}
+    # G13/G14: Default healthy orderbook for liquidity checks
+    # Ask ($0.95) matches order price, allowing entries and exits
+    client.get_order_book.return_value = {
+        "bids": [{"price": "0.93", "size": "100"}],
+        "asks": [{"price": "0.95", "size": "100"}],  # Ask <= order price ($0.95)
+    }
     return client
 
 
@@ -1076,3 +1083,522 @@ class TestFullWorkflow:
         )
 
         assert exit_result.success is True
+
+
+# =============================================================================
+# G14: Stale Order Management Tests
+# =============================================================================
+
+
+class TestG14StaleOrderManagement:
+    """
+    Tests for G14: Stale Order Management - Capital Efficiency.
+
+    Problem: Orders in illiquid markets with wide spreads lock up capital
+    indefinitely. When spread is 99.9% (bid=$0.001, ask=$0.999), our BUY
+    order at $0.95 will NEVER fill because the ask is $0.999.
+
+    Solution:
+    1. Periodically check spread on open orders
+    2. Cancel orders that are unfillable or have excessive spread
+    3. Prevent placing orders in illiquid markets (pre-entry check)
+    """
+
+    @pytest.fixture
+    def g14_config(self):
+        """Config with G14 settings."""
+        return ExecutionConfig(
+            max_price=Decimal("0.95"),
+            default_position_size=Decimal("20"),
+            min_balance_reserve=Decimal("100"),
+            stale_order_max_spread=Decimal("0.50"),  # 50%
+            stale_order_max_age_hours=4.0,
+            stale_order_min_age_hours=1.0,
+            verify_entry_liquidity=True,
+            entry_max_spread=Decimal("0.30"),  # 30%
+        )
+
+    @pytest.fixture
+    def old_order(self):
+        """Order that is old enough to be considered for cancellation."""
+        return Order(
+            order_id="old_order_123",
+            token_id="tok_stale_market",
+            condition_id="0xtest",
+            side="BUY",
+            price=Decimal("0.95"),
+            size=Decimal("20"),
+            filled_size=Decimal("0"),
+            status=OrderStatus.LIVE,
+            created_at=datetime.now(timezone.utc) - timedelta(hours=3),
+        )
+
+    @pytest.fixture
+    def young_order(self):
+        """Order that is too young to cancel."""
+        return Order(
+            order_id="young_order_456",
+            token_id="tok_stale_market",
+            condition_id="0xtest",
+            side="BUY",
+            price=Decimal("0.95"),
+            size=Decimal("20"),
+            filled_size=Decimal("0"),
+            status=OrderStatus.LIVE,
+            created_at=datetime.now(timezone.utc) - timedelta(minutes=30),
+        )
+
+    @pytest.fixture
+    def mock_illiquid_orderbook(self, mock_clob_client):
+        """Mock orderbook with 99.9% spread (bid=$0.001, ask=$0.999)."""
+        mock_clob_client.get_order_book.return_value = {
+            "bids": [{"price": "0.001", "size": "1000"}],
+            "asks": [{"price": "0.999", "size": "1000"}],
+        }
+        return mock_clob_client
+
+    @pytest.fixture
+    def mock_healthy_orderbook(self, mock_clob_client):
+        """Mock orderbook with healthy 2% spread (bid=$0.94, ask=$0.96)."""
+        mock_clob_client.get_order_book.return_value = {
+            "bids": [{"price": "0.94", "size": "1000"}],
+            "asks": [{"price": "0.96", "size": "1000"}],
+        }
+        return mock_clob_client
+
+    @pytest.fixture
+    def mock_moderate_spread_orderbook(self, mock_clob_client):
+        """Mock orderbook with 40% spread (still acceptable for entries)."""
+        mock_clob_client.get_order_book.return_value = {
+            "bids": [{"price": "0.50", "size": "1000"}],
+            "asks": [{"price": "0.84", "size": "1000"}],
+        }
+        return mock_clob_client
+
+    # -------------------------------------------------------------------------
+    # Stale Order Cancellation Tests
+    # -------------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_cancels_stale_order_with_wide_spread(
+        self, mock_db, mock_illiquid_orderbook, g14_config, old_order
+    ):
+        """Should cancel old orders in illiquid markets with wide spreads."""
+        service = ExecutionService(
+            db=mock_db,
+            clob_client=mock_illiquid_orderbook,
+            config=g14_config,
+        )
+        service._order_manager._orders[old_order.order_id] = old_order
+        mock_illiquid_orderbook.cancel.return_value = {"success": True}
+
+        result = await service.cancel_stale_orders()
+
+        assert result["cancelled"] == 1
+        assert result["freed_capital"] == Decimal("19.00")  # 0.95 * 20
+        assert len(result["details"]) == 1
+        assert "unfillable" in result["details"][0]["reason"]
+
+    @pytest.mark.asyncio
+    async def test_does_not_cancel_young_order(
+        self, mock_db, mock_illiquid_orderbook, g14_config, young_order
+    ):
+        """Should not cancel orders younger than min_age_hours."""
+        service = ExecutionService(
+            db=mock_db,
+            clob_client=mock_illiquid_orderbook,
+            config=g14_config,
+        )
+        service._order_manager._orders[young_order.order_id] = young_order
+
+        result = await service.cancel_stale_orders()
+
+        assert result["cancelled"] == 0
+        assert result["checked"] == 1
+
+    @pytest.mark.asyncio
+    async def test_does_not_cancel_order_in_healthy_market(
+        self, mock_db, mock_healthy_orderbook, g14_config, old_order
+    ):
+        """Should not cancel orders in liquid markets with tight spreads."""
+        # Adjust order price so it's fillable (ask=$0.96, order=$0.95)
+        old_order.price = Decimal("0.96")  # At ask price - fillable
+        service = ExecutionService(
+            db=mock_db,
+            clob_client=mock_healthy_orderbook,
+            config=g14_config,
+        )
+        service._order_manager._orders[old_order.order_id] = old_order
+
+        result = await service.cancel_stale_orders()
+
+        assert result["cancelled"] == 0
+
+    @pytest.mark.asyncio
+    async def test_detects_unfillable_buy_order(
+        self, mock_db, mock_clob_client, g14_config, old_order
+    ):
+        """BUY order at $0.95 cannot fill when best ask is $0.999."""
+        mock_clob_client.get_order_book.return_value = {
+            "bids": [{"price": "0.50", "size": "100"}],
+            "asks": [{"price": "0.999", "size": "100"}],  # Ask > order price
+        }
+        mock_clob_client.cancel.return_value = {"success": True}
+
+        service = ExecutionService(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=g14_config,
+        )
+        service._order_manager._orders[old_order.order_id] = old_order
+
+        result = await service.cancel_stale_orders()
+
+        assert result["cancelled"] == 1
+        assert "unfillable" in result["details"][0]["reason"]
+
+    @pytest.mark.asyncio
+    async def test_handles_orderbook_as_object(
+        self, mock_db, mock_clob_client, g14_config, old_order
+    ):
+        """Should handle orderbook returned as object (not dict)."""
+        # Create mock orderbook object
+        class MockOrderSummary:
+            def __init__(self, price, size):
+                self.price = price
+                self.size = size
+
+        class MockOrderBook:
+            def __init__(self):
+                self.bids = [MockOrderSummary("0.001", "1000")]
+                self.asks = [MockOrderSummary("0.999", "1000")]
+
+        mock_clob_client.get_order_book.return_value = MockOrderBook()
+        mock_clob_client.cancel.return_value = {"success": True}
+
+        service = ExecutionService(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=g14_config,
+        )
+        service._order_manager._orders[old_order.order_id] = old_order
+
+        result = await service.cancel_stale_orders()
+
+        assert result["cancelled"] == 1
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_no_clob_client(
+        self, mock_db, g14_config
+    ):
+        """Should return empty result in dry run mode."""
+        service = ExecutionService(
+            db=mock_db,
+            clob_client=None,  # Dry run
+            config=g14_config,
+        )
+
+        result = await service.cancel_stale_orders()
+
+        assert result["cancelled"] == 0
+        assert result["checked"] == 0
+
+    @pytest.mark.asyncio
+    async def test_calculates_freed_capital_correctly(
+        self, mock_db, mock_illiquid_orderbook, g14_config
+    ):
+        """Should calculate freed capital from unfilled size."""
+        # Partially filled order
+        partial_order = Order(
+            order_id="partial_123",
+            token_id="tok_stale",
+            condition_id="0xtest",
+            side="BUY",
+            price=Decimal("0.80"),
+            size=Decimal("100"),
+            filled_size=Decimal("25"),  # 75 unfilled
+            status=OrderStatus.PARTIAL,
+            created_at=datetime.now(timezone.utc) - timedelta(hours=5),
+        )
+        mock_illiquid_orderbook.cancel.return_value = {"success": True}
+
+        service = ExecutionService(
+            db=mock_db,
+            clob_client=mock_illiquid_orderbook,
+            config=g14_config,
+        )
+        service._order_manager._orders[partial_order.order_id] = partial_order
+
+        result = await service.cancel_stale_orders()
+
+        # Freed capital = 0.80 * (100 - 25) = 60.00
+        assert result["freed_capital"] == Decimal("60.00")
+
+    # -------------------------------------------------------------------------
+    # Pre-Entry Liquidity Verification Tests
+    # -------------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_rejects_entry_in_illiquid_market(
+        self, mock_db, mock_illiquid_orderbook, g14_config, entry_signal, strategy_context
+    ):
+        """Should reject entry when spread is too wide."""
+        service = ExecutionService(
+            db=mock_db,
+            clob_client=mock_illiquid_orderbook,
+            config=g14_config,
+        )
+
+        result = await service.execute_entry(entry_signal, strategy_context)
+
+        assert result.success is False
+        assert result.error_type == "insufficient_liquidity"
+        assert "spread too wide" in result.error or "unfillable" in result.error
+
+    @pytest.mark.asyncio
+    async def test_allows_entry_in_liquid_market(
+        self, mock_db, mock_clob_client, g14_config, strategy_context
+    ):
+        """Should allow entry when market has good liquidity."""
+        # Orderbook with tight spread where ask <= order price
+        mock_clob_client.get_order_book.return_value = {
+            "bids": [{"price": "0.93", "size": "1000"}],
+            "asks": [{"price": "0.95", "size": "1000"}],  # Ask == order price - fillable
+        }
+        mock_clob_client.create_and_post_order.return_value = {
+            "orderID": "order_123",
+            "status": "LIVE",
+        }
+        mock_clob_client.get_order.return_value = {
+            "orderID": "order_123",
+            "status": "MATCHED",
+            "filledSize": "20",
+            "size": "20",
+            "avgPrice": "0.95",
+        }
+
+        service = ExecutionService(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=g14_config,
+        )
+
+        # Entry signal at $0.95 should fill when ask is $0.95
+        entry_signal = EntrySignal(
+            token_id="tok_yes_abc",
+            side="BUY",
+            price=Decimal("0.95"),
+            size=Decimal("20"),
+            reason="Test entry",
+        )
+
+        result = await service.execute_entry(entry_signal, strategy_context)
+
+        assert result.success is True
+
+    @pytest.mark.asyncio
+    async def test_verify_entry_liquidity_checks_spread(
+        self, mock_db, mock_clob_client, g14_config
+    ):
+        """Should check spread is within threshold."""
+        # 60% spread (bid=$0.30, ask=$0.75)
+        mock_clob_client.get_order_book.return_value = {
+            "bids": [{"price": "0.30", "size": "100"}],
+            "asks": [{"price": "0.75", "size": "100"}],
+        }
+
+        service = ExecutionService(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=g14_config,
+        )
+
+        is_valid, reason = await service.verify_entry_liquidity(
+            token_id="tok_test",
+            side="BUY",
+            price=Decimal("0.50"),
+        )
+
+        assert is_valid is False
+        assert "spread too wide" in reason
+
+    @pytest.mark.asyncio
+    async def test_verify_entry_liquidity_checks_fillability(
+        self, mock_db, mock_clob_client, g14_config
+    ):
+        """Should check if order can fill at requested price."""
+        # Tight spread but ask is above our order price
+        mock_clob_client.get_order_book.return_value = {
+            "bids": [{"price": "0.90", "size": "100"}],
+            "asks": [{"price": "0.97", "size": "100"}],  # Ask > our 0.95 order
+        }
+
+        service = ExecutionService(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=g14_config,
+        )
+
+        is_valid, reason = await service.verify_entry_liquidity(
+            token_id="tok_test",
+            side="BUY",
+            price=Decimal("0.95"),
+        )
+
+        assert is_valid is False
+        assert "unfillable BUY" in reason
+
+    @pytest.mark.asyncio
+    async def test_verify_entry_liquidity_allows_when_disabled(
+        self, mock_db, mock_illiquid_orderbook
+    ):
+        """Should allow entry when verify_entry_liquidity is disabled."""
+        config = ExecutionConfig(
+            verify_entry_liquidity=False,  # Disabled
+        )
+
+        service = ExecutionService(
+            db=mock_db,
+            clob_client=mock_illiquid_orderbook,
+            config=config,
+        )
+
+        is_valid, reason = await service.verify_entry_liquidity(
+            token_id="tok_test",
+            side="BUY",
+            price=Decimal("0.95"),
+        )
+
+        assert is_valid is True
+
+    @pytest.mark.asyncio
+    async def test_verify_entry_allows_in_dry_run(
+        self, mock_db, g14_config
+    ):
+        """Should allow entry in dry run mode (no CLOB client)."""
+        service = ExecutionService(
+            db=mock_db,
+            clob_client=None,  # Dry run
+            config=g14_config,
+        )
+
+        is_valid, reason = await service.verify_entry_liquidity(
+            token_id="tok_test",
+            side="BUY",
+            price=Decimal("0.95"),
+        )
+
+        assert is_valid is True
+
+    @pytest.mark.asyncio
+    async def test_verify_entry_rejects_empty_orderbook(
+        self, mock_db, mock_clob_client, g14_config
+    ):
+        """Should reject entry when orderbook is empty."""
+        mock_clob_client.get_order_book.return_value = {
+            "bids": [],
+            "asks": [],
+        }
+
+        service = ExecutionService(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=g14_config,
+        )
+
+        is_valid, reason = await service.verify_entry_liquidity(
+            token_id="tok_test",
+            side="BUY",
+            price=Decimal("0.95"),
+        )
+
+        assert is_valid is False
+        assert "no liquidity" in reason
+
+    @pytest.mark.asyncio
+    async def test_verify_entry_handles_api_error_gracefully(
+        self, mock_db, mock_clob_client, g14_config
+    ):
+        """Should fail open if API errors (don't block on transient failures)."""
+        mock_clob_client.get_order_book.side_effect = Exception("API timeout")
+
+        service = ExecutionService(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=g14_config,
+        )
+
+        is_valid, reason = await service.verify_entry_liquidity(
+            token_id="tok_test",
+            side="BUY",
+            price=Decimal("0.95"),
+        )
+
+        # Fail open - allow trade on error
+        assert is_valid is True
+
+    # -------------------------------------------------------------------------
+    # Regression Test: The Scenario That Caused This Fix
+    # -------------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_regression_8_dead_orders_locked_152_dollars(
+        self, mock_db, mock_clob_client, g14_config
+    ):
+        """
+        REGRESSION TEST: Real scenario from production.
+
+        8 BUY orders at $0.95 each ($19 x 8 = $152 locked)
+        All in markets with 99.9% spread (bid=$0.001, ask=$0.999)
+        Orders 12-14 hours old with 0 fills
+        Only $10 available for new trades
+
+        This fix should:
+        1. Detect all 8 orders as stale
+        2. Cancel them to free up $152
+        3. Prevent placing new orders in such markets
+        """
+        # Create 8 stale orders
+        orders = []
+        for i in range(8):
+            order = Order(
+                order_id=f"stale_order_{i}",
+                token_id=f"dead_market_token_{i}",
+                condition_id=f"0xdead{i}",
+                side="BUY",
+                price=Decimal("0.95"),
+                size=Decimal("20"),
+                filled_size=Decimal("0"),
+                status=OrderStatus.LIVE,
+                created_at=datetime.now(timezone.utc) - timedelta(hours=12 + i),
+            )
+            orders.append(order)
+
+        # All markets have 99.9% spread
+        mock_clob_client.get_order_book.return_value = {
+            "bids": [{"price": "0.001", "size": "1000000"}],
+            "asks": [{"price": "0.999", "size": "1000000"}],
+        }
+        mock_clob_client.cancel.return_value = {"success": True}
+
+        service = ExecutionService(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=g14_config,
+        )
+
+        for order in orders:
+            service._order_manager._orders[order.order_id] = order
+
+        result = await service.cancel_stale_orders()
+
+        # All 8 should be cancelled
+        assert result["cancelled"] == 8
+        assert result["checked"] == 8
+
+        # All $152 should be freed (8 * $19)
+        assert result["freed_capital"] == Decimal("152.00")
+
+        # Each should be marked as unfillable
+        for detail in result["details"]:
+            assert "unfillable" in detail["reason"] or "spread" in detail["reason"]
