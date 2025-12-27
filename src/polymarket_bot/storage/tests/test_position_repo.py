@@ -129,7 +129,7 @@ class TestExitEventRepository:
         exit_repo = ExitEventRepository(clean_db)
 
         event = ExitEvent(
-            position_id=position.id,
+            position_id=str(position.id),  # Convert int to str for model
             token_id=position.token_id,
             condition_id=position.condition_id,
             exit_type="take_profit",
@@ -159,7 +159,7 @@ class TestExitEventRepository:
         exit_repo = ExitEventRepository(clean_db)
 
         event = ExitEvent(
-            position_id=position.id,
+            position_id=str(position.id),  # Convert int to str for model
             token_id=position.token_id,
             exit_type="stop_loss",
             entry_price=0.75,
@@ -188,7 +188,7 @@ class TestExitEventRepository:
         exit_repo = ExitEventRepository(clean_db)
 
         event = ExitEvent(
-            position_id=position.id,
+            position_id=str(position.id),  # Convert int to str for model
             token_id=position.token_id,
             exit_type="manual",
             entry_price=0.75,

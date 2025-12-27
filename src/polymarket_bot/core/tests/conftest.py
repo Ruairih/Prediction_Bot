@@ -6,6 +6,7 @@ the storage, ingestion, and strategy layers.
 """
 import os
 import pytest
+import pytest_asyncio
 from unittest.mock import MagicMock, AsyncMock
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
@@ -227,14 +228,28 @@ def engine_config():
 
 
 @pytest.fixture
-def trading_engine(mock_db, engine_config, mock_strategy, mock_api_client):
-    """Configured TradingEngine for tests."""
+def stopped_engine(mock_db, engine_config, mock_strategy, mock_api_client):
+    """Configured TradingEngine for tests, NOT started (for lifecycle tests)."""
     return TradingEngine(
         config=engine_config,
         db=mock_db,
         strategy=mock_strategy,
         api_client=mock_api_client,
     )
+
+
+@pytest_asyncio.fixture
+async def trading_engine(mock_db, engine_config, mock_strategy, mock_api_client):
+    """Configured TradingEngine for tests, already started."""
+    engine = TradingEngine(
+        config=engine_config,
+        db=mock_db,
+        strategy=mock_strategy,
+        api_client=mock_api_client,
+    )
+    await engine.start()  # Start the engine so process_event works
+    yield engine
+    await engine.stop()
 
 
 # =============================================================================

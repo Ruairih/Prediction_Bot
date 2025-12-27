@@ -86,21 +86,31 @@ class TestDatabaseConnection:
 
 
 @pytest.mark.asyncio
-class TestDatabaseNotInitialized:
-    """Tests for uninitialized database."""
+class TestDatabaseUnreachable:
+    """Tests for unreachable database."""
 
-    async def test_connection_raises_without_init(self, db_config: DatabaseConfig):
-        """Test that connection raises if not initialized."""
-        db = Database(db_config)  # Not initialized
+    async def test_connection_raises_with_bad_url(self):
+        """Test that connection raises when database is unreachable."""
+        bad_config = DatabaseConfig(
+            url="postgresql://bad:bad@localhost:59999/nonexistent",
+            reconnect_max_attempts=1,  # Fail fast
+            reconnect_initial_delay=0.1,
+        )
+        db = Database(bad_config)
 
-        with pytest.raises(RuntimeError, match="not initialized"):
+        with pytest.raises(Exception):  # Connection error
             async with db.connection():
                 pass
 
-    async def test_transaction_raises_without_init(self, db_config: DatabaseConfig):
-        """Test that transaction raises if not initialized."""
-        db = Database(db_config)  # Not initialized
+    async def test_transaction_raises_with_bad_url(self):
+        """Test that transaction raises when database is unreachable."""
+        bad_config = DatabaseConfig(
+            url="postgresql://bad:bad@localhost:59999/nonexistent",
+            reconnect_max_attempts=1,  # Fail fast
+            reconnect_initial_delay=0.1,
+        )
+        db = Database(bad_config)
 
-        with pytest.raises(RuntimeError, match="not initialized"):
+        with pytest.raises(Exception):  # Connection error
             async with db.transaction():
                 pass

@@ -128,10 +128,10 @@ class PositionRepository(BaseRepository[Position]):
             SET status = 'closed',
                 current_price = $2,
                 current_value = size * $2,
-                realized_pnl = COALESCE($4, (size * $2) - entry_cost),
+                realized_pnl = COALESCE($4::numeric, (size * $2) - entry_cost),
                 unrealized_pnl = 0,
-                exit_order_id = $3,
-                exit_status = CASE WHEN $3 IS NULL THEN NULL ELSE 'filled' END,
+                exit_order_id = $3::text,
+                exit_status = CASE WHEN $3::text IS NULL THEN NULL ELSE 'filled' END,
                 exit_pending = FALSE,
                 exit_timestamp = $5,
                 updated_at = $5

@@ -38,9 +38,9 @@ class TestEngineInitialization:
         assert engine.config == config
         assert engine.strategy == mock_strategy
 
-    def test_engine_starts_in_stopped_state(self, trading_engine):
+    def test_engine_starts_in_stopped_state(self, stopped_engine):
         """Engine should not be running until started."""
-        assert trading_engine.is_running is False
+        assert stopped_engine.is_running is False
 
     def test_engine_has_stats(self, trading_engine):
         """Engine should track statistics."""
@@ -63,34 +63,40 @@ class TestEngineLifecycle:
     """Tests for start/stop lifecycle."""
 
     @pytest.mark.asyncio
-    async def test_start_sets_running_flag(self, trading_engine):
+    async def test_start_sets_running_flag(self, stopped_engine):
         """Starting engine should set is_running to True."""
-        await trading_engine.start()
+        assert stopped_engine.is_running is False  # Verify initially stopped
+        await stopped_engine.start()
 
-        assert trading_engine.is_running is True
+        assert stopped_engine.is_running is True
+
+        await stopped_engine.stop()  # Cleanup
 
     @pytest.mark.asyncio
-    async def test_stop_clears_running_flag(self, trading_engine):
+    async def test_stop_clears_running_flag(self, stopped_engine):
         """Stopping engine should set is_running to False."""
-        await trading_engine.start()
-        await trading_engine.stop()
+        await stopped_engine.start()
+        await stopped_engine.stop()
 
-        assert trading_engine.is_running is False
+        assert stopped_engine.is_running is False
 
     @pytest.mark.asyncio
-    async def test_start_when_already_running(self, trading_engine):
+    async def test_start_when_already_running(self, stopped_engine):
         """Starting when already running should be idempotent."""
-        await trading_engine.start()
-        await trading_engine.start()  # Second call
+        await stopped_engine.start()
+        await stopped_engine.start()  # Second call
 
-        assert trading_engine.is_running is True
+        assert stopped_engine.is_running is True
+
+        await stopped_engine.stop()  # Cleanup
 
     @pytest.mark.asyncio
-    async def test_stop_when_not_running(self, trading_engine):
+    async def test_stop_when_not_running(self, stopped_engine):
         """Stopping when not running should be safe."""
-        await trading_engine.stop()  # Not started
+        assert stopped_engine.is_running is False  # Verify initially stopped
+        await stopped_engine.stop()  # Should not raise
 
-        assert trading_engine.is_running is False
+        assert stopped_engine.is_running is False
 
 
 class TestEventProcessing:

@@ -123,16 +123,17 @@ class TestExitExecution:
     async def test_returns_true_on_success(
         self, exit_manager, long_held_position, mock_db, mock_clob_client
     ):
-        """Should return True when exit succeeds."""
+        """Should return (True, order_id) when exit succeeds."""
         exit_manager._position_tracker.positions[long_held_position.position_id] = long_held_position
 
-        result = await exit_manager.execute_exit(
+        success, order_id = await exit_manager.execute_exit(
             long_held_position,
             current_price=Decimal("0.99"),
             reason="profit_target"
         )
 
-        assert result is True
+        assert success is True
+        assert order_id is not None
 
 
 class TestExitBoundaries:
@@ -364,7 +365,8 @@ class TestOrderFillConfirmation:
         )
 
         # FIX: Should FAIL - LIVE means not filled yet, times out
-        assert result is False
+        success, order_id = result
+        assert success is False
 
     @pytest.mark.asyncio
     async def test_live_to_matched_sequence(
@@ -423,7 +425,8 @@ class TestOrderFillConfirmation:
         )
 
         # Should succeed - order eventually filled
-        assert result is True
+        success, order_id = result
+        assert success is True
 
     @pytest.mark.asyncio
     async def test_does_not_close_on_rejection(
@@ -468,7 +471,8 @@ class TestOrderFillConfirmation:
         )
 
         # Should fail - order was rejected
-        assert result is False
+        success, order_id = result
+        assert success is False
 
         # Position should NOT be closed
         pos = position_tracker.get_position(position.position_id)
@@ -511,7 +515,8 @@ class TestOrderFillConfirmation:
             reason="profit_target",
         )
 
-        assert result is True
+        success, order_id = result
+        assert success is True
 
     @pytest.mark.asyncio
     async def test_handles_timeout(
@@ -556,7 +561,8 @@ class TestOrderFillConfirmation:
         )
 
         # Should fail due to timeout
-        assert result is False
+        success, order_id = result
+        assert success is False
 
     @pytest.mark.asyncio
     async def test_refreshes_balance_after_resolution(
@@ -636,7 +642,8 @@ class TestAtomicExitClaiming:
             reason="profit_target",
         )
 
-        assert result is True
+        success, order_id = result
+        assert success is True
         # Verify atomic claim was attempted
         mock_db.fetchval.assert_called()
 
@@ -685,7 +692,8 @@ class TestAtomicExitClaiming:
         )
 
         # Should return False - pending exit blocks new order
-        assert result is False
+        success, order_id = result
+        assert success is False
 
         # Should NOT have submitted a new order
         mock_clob_client.create_and_post_order.assert_not_called()
@@ -728,7 +736,8 @@ class TestAtomicExitClaiming:
         )
 
         # Should succeed - pending was cleared
-        assert result is True
+        success, order_id = result
+        assert success is True
         mock_clob_client.create_and_post_order.assert_called()
 
     @pytest.mark.asyncio
@@ -770,7 +779,8 @@ class TestAtomicExitClaiming:
         )
 
         # Should fail due to no order_id
-        assert result is False
+        success, order_id = result
+        assert success is False
 
         # Pending should be cleared to allow retry
         pos = position_tracker.get_position(position.position_id)
@@ -814,7 +824,8 @@ class TestAtomicExitClaiming:
         )
 
         # Should fail due to exception
-        assert result is False
+        success, order_id = result
+        assert success is False
 
         # Pending should be cleared to allow retry
         pos = position_tracker.get_position(position.position_id)
