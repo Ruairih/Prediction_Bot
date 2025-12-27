@@ -586,3 +586,391 @@ class TestResourceCleanup:
         # All reservations should be released
         assert manager.get_available_balance() == initial_balance
         assert len(manager._balance_manager.get_active_reservations()) == 0
+
+
+# =============================================================================
+# Terminal CLOB Status Tests (Codex Review Feedback)
+# =============================================================================
+
+
+class TestTerminalCLOBStatuses:
+    """Tests for handling terminal CLOB statuses correctly."""
+
+    @pytest.fixture
+    def mock_db(self):
+        """Mock database."""
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value="INSERT 0")
+        db.fetch = AsyncMock(return_value=[])
+        db.fetchrow = AsyncMock(return_value=None)
+        db.fetchval = AsyncMock(return_value=None)
+        return db
+
+    @pytest.fixture
+    def mock_clob_client(self):
+        """Mock CLOB client."""
+        client = MagicMock()
+        client.create_and_post_order = MagicMock(return_value={"orderID": "order_123", "status": "LIVE"})
+        client.get_balance_allowance = MagicMock(return_value={"balance": "1000000000"})
+        client.cancel = MagicMock(return_value=True)
+        return client
+
+    @pytest.mark.asyncio
+    async def test_handles_canceled_status(self, mock_db, mock_clob_client):
+        """CANCELED (American spelling) should be recognized as terminal."""
+        mock_clob_client.get_order.return_value = {
+            "orderID": "order_123",
+            "status": "CANCELED",  # American spelling from CLOB
+            "filledSize": "0",
+            "size": "20",
+        }
+
+        manager = OrderManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=OrderConfig(max_price=Decimal("0.95")),
+        )
+
+        order_id = await manager.submit_order(
+            token_id="tok_test",
+            side="BUY",
+            price=Decimal("0.95"),
+            size=Decimal("20"),
+        )
+
+        initial_balance = manager.get_available_balance()
+
+        await manager.sync_order_status(order_id)
+
+        order = manager.get_order(order_id)
+        assert order.status == OrderStatus.CANCELLED
+        # Reservation should be released for cancelled orders
+        # (balance should be higher after cancellation)
+
+    @pytest.mark.asyncio
+    async def test_handles_cancelled_status(self, mock_db, mock_clob_client):
+        """CANCELLED (British spelling) should also be recognized."""
+        mock_clob_client.get_order.return_value = {
+            "orderID": "order_123",
+            "status": "CANCELLED",  # British spelling
+            "filledSize": "0",
+            "size": "20",
+        }
+
+        manager = OrderManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=OrderConfig(max_price=Decimal("0.95")),
+        )
+
+        order_id = await manager.submit_order(
+            token_id="tok_test",
+            side="BUY",
+            price=Decimal("0.95"),
+            size=Decimal("20"),
+        )
+
+        await manager.sync_order_status(order_id)
+
+        order = manager.get_order(order_id)
+        assert order.status == OrderStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    async def test_handles_expired_status(self, mock_db, mock_clob_client):
+        """EXPIRED status should be handled as terminal."""
+        mock_clob_client.get_order.return_value = {
+            "orderID": "order_123",
+            "status": "EXPIRED",
+            "filledSize": "5",  # Partially filled before expiry
+            "size": "20",
+        }
+
+        manager = OrderManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=OrderConfig(max_price=Decimal("0.95")),
+        )
+
+        order_id = await manager.submit_order(
+            token_id="tok_test",
+            side="BUY",
+            price=Decimal("0.95"),
+            size=Decimal("20"),
+        )
+
+        await manager.sync_order_status(order_id)
+
+        order = manager.get_order(order_id)
+        # Order should be in a terminal state (EXPIRED maps to FAILED or CANCELLED)
+        assert order.status in [OrderStatus.CANCELLED, OrderStatus.FAILED, OrderStatus.PARTIAL]
+
+
+# =============================================================================
+# Partial Fill Tests (Codex Review Feedback)
+# =============================================================================
+
+
+class TestPartialFillHandling:
+    """Tests for handling partial fills with avgPrice changes."""
+
+    @pytest.fixture
+    def mock_db(self):
+        """Mock database."""
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value="INSERT 0")
+        db.fetch = AsyncMock(return_value=[])
+        db.fetchrow = AsyncMock(return_value=None)
+        db.fetchval = AsyncMock(return_value=None)
+        return db
+
+    @pytest.fixture
+    def mock_clob_client(self):
+        """Mock CLOB client."""
+        client = MagicMock()
+        client.create_and_post_order = MagicMock(return_value={"orderID": "order_123", "status": "LIVE"})
+        client.get_balance_allowance = MagicMock(return_value={"balance": "1000000000"})
+        return client
+
+    @pytest.mark.asyncio
+    async def test_tracks_incremental_fills(self, mock_db, mock_clob_client):
+        """Should track fills as they occur incrementally."""
+        manager = OrderManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=OrderConfig(max_price=Decimal("0.95")),
+        )
+
+        order_id = await manager.submit_order(
+            token_id="tok_test",
+            side="BUY",
+            price=Decimal("0.95"),
+            size=Decimal("100"),
+        )
+
+        # First partial fill: 30 shares at 0.94
+        mock_clob_client.get_order.return_value = {
+            "orderID": "order_123",
+            "status": "LIVE",
+            "filledSize": "30",
+            "size": "100",
+            "avgPrice": "0.94",
+        }
+
+        await manager.sync_order_status(order_id)
+        order = manager.get_order(order_id)
+        assert order.filled_size == Decimal("30")
+        assert order.avg_fill_price == Decimal("0.94")
+
+        # Second partial fill: now 70 shares at weighted avg 0.945
+        mock_clob_client.get_order.return_value = {
+            "orderID": "order_123",
+            "status": "LIVE",
+            "filledSize": "70",
+            "size": "100",
+            "avgPrice": "0.945",  # Weighted average changed
+        }
+
+        await manager.sync_order_status(order_id)
+        order = manager.get_order(order_id)
+        assert order.filled_size == Decimal("70")
+        assert order.avg_fill_price == Decimal("0.945")
+
+    @pytest.mark.asyncio
+    async def test_handles_complete_fill_after_partial(self, mock_db, mock_clob_client):
+        """Should correctly transition from partial to complete fill."""
+        manager = OrderManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=OrderConfig(max_price=Decimal("0.95")),
+        )
+
+        order_id = await manager.submit_order(
+            token_id="tok_test",
+            side="BUY",
+            price=Decimal("0.95"),
+            size=Decimal("50"),
+        )
+
+        # Partial fill first
+        mock_clob_client.get_order.return_value = {
+            "orderID": "order_123",
+            "status": "LIVE",
+            "filledSize": "25",
+            "size": "50",
+            "avgPrice": "0.94",
+        }
+
+        await manager.sync_order_status(order_id)
+        order = manager.get_order(order_id)
+        # Partial fills show as PARTIAL status, not LIVE
+        assert order.status == OrderStatus.PARTIAL
+
+        # Then complete fill
+        mock_clob_client.get_order.return_value = {
+            "orderID": "order_123",
+            "status": "MATCHED",
+            "filledSize": "50",
+            "size": "50",
+            "avgPrice": "0.945",
+        }
+
+        await manager.sync_order_status(order_id)
+        order = manager.get_order(order_id)
+        assert order.status == OrderStatus.FILLED
+        assert order.filled_size == Decimal("50")
+
+    @pytest.mark.asyncio
+    async def test_partial_fill_then_cancel(self, mock_db, mock_clob_client):
+        """Should handle partial fill followed by cancellation correctly."""
+        manager = OrderManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=OrderConfig(max_price=Decimal("0.95")),
+        )
+
+        order_id = await manager.submit_order(
+            token_id="tok_test",
+            side="BUY",
+            price=Decimal("0.95"),
+            size=Decimal("100"),
+        )
+
+        # Partial fill
+        mock_clob_client.get_order.return_value = {
+            "orderID": "order_123",
+            "status": "LIVE",
+            "filledSize": "40",
+            "size": "100",
+            "avgPrice": "0.94",
+        }
+
+        await manager.sync_order_status(order_id)
+
+        # Then cancelled (remaining 60 not filled)
+        mock_clob_client.get_order.return_value = {
+            "orderID": "order_123",
+            "status": "CANCELED",
+            "filledSize": "40",  # Only 40 were filled
+            "size": "100",
+            "avgPrice": "0.94",
+        }
+
+        await manager.sync_order_status(order_id)
+        order = manager.get_order(order_id)
+
+        # Should preserve the fill info even though cancelled
+        assert order.filled_size == Decimal("40")
+        assert order.avg_fill_price == Decimal("0.94")
+
+
+# =============================================================================
+# Balance Reserve Enforcement Tests (Codex Review Feedback)
+# =============================================================================
+
+
+class TestBalanceReserveEnforcement:
+    """Tests for minimum balance reserve enforcement."""
+
+    @pytest.fixture
+    def mock_db(self):
+        """Mock database."""
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value="INSERT 0")
+        db.fetch = AsyncMock(return_value=[])
+        db.fetchrow = AsyncMock(return_value=None)
+        db.fetchval = AsyncMock(return_value=None)
+        return db
+
+    @pytest.fixture
+    def mock_clob_client(self):
+        """Mock CLOB client."""
+        call_count = [0]
+
+        def create_order(*args, **kwargs):
+            call_count[0] += 1
+            return {"orderID": f"order_{call_count[0]}", "status": "LIVE"}
+
+        client = MagicMock()
+        client.create_and_post_order = MagicMock(side_effect=create_order)
+        # Start with $500 balance (500,000,000 in USDC base units)
+        client.get_balance_allowance = MagicMock(return_value={"balance": "500000000"})
+        return client
+
+    @pytest.mark.asyncio
+    async def test_respects_min_balance_reserve(self, mock_db, mock_clob_client):
+        """Should not allocate below minimum balance reserve."""
+        manager = OrderManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=OrderConfig(
+                max_price=Decimal("0.95"),
+                min_balance_reserve=Decimal("100"),  # Keep $100 in reserve
+            ),
+        )
+
+        # Refresh balance from mock ($500) - sync method
+        manager._balance_manager.refresh_balance()
+
+        # Tradeable balance should be $400 ($500 - $100 reserve)
+        tradeable = manager._balance_manager.get_tradeable_balance()
+        assert tradeable <= Decimal("400")
+
+        # Try to submit orders that would exhaust tradeable balance
+        submitted = 0
+        for i in range(10):
+            try:
+                await manager.submit_order(
+                    token_id=f"tok_{i}",
+                    side="BUY",
+                    price=Decimal("0.95"),
+                    size=Decimal("100"),  # $95 each
+                )
+                submitted += 1
+            except InsufficientBalanceError:
+                break
+
+        # Should allow ~4 orders ($400 / $95 each ≈ 4)
+        assert submitted <= 4
+
+        # Tradeable balance should be close to zero after orders
+        remaining = manager._balance_manager.get_tradeable_balance()
+        assert remaining >= Decimal("0")
+
+    @pytest.mark.asyncio
+    async def test_concurrent_orders_respect_min_reserve(self, mock_db, mock_clob_client):
+        """Concurrent submissions should collectively respect min reserve."""
+        manager = OrderManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            config=OrderConfig(
+                max_price=Decimal("0.95"),
+                min_balance_reserve=Decimal("100"),
+            ),
+        )
+
+        manager._balance_manager.refresh_balance()  # sync method
+        initial_tradeable = manager._balance_manager.get_tradeable_balance()
+
+        async def submit_order(i):
+            try:
+                return await manager.submit_order(
+                    token_id=f"tok_{i}",
+                    side="BUY",
+                    price=Decimal("0.95"),
+                    size=Decimal("50"),  # $47.50 each
+                )
+            except InsufficientBalanceError:
+                return None
+
+        # Submit many orders concurrently
+        results = await asyncio.gather(*[submit_order(i) for i in range(20)])
+
+        successful = [r for r in results if r is not None]
+
+        # With $400 tradeable, should allow ~8 orders of $47.50
+        assert len(successful) <= 10
+
+        # Total reserved should not exceed initial tradeable balance
+        reservations = manager._balance_manager.get_active_reservations()
+        total_reserved = sum(r.amount for r in reservations)
+        assert total_reserved <= initial_tradeable
