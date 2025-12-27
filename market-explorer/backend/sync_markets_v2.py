@@ -429,6 +429,9 @@ async def sync_markets(active_only: bool = False, limit: int = None):
     print("Connecting to database...")
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
 
+    # Record sync start time to detect stale markets
+    sync_start = datetime.now(timezone.utc)
+
     async with pool.acquire() as conn:
         print("Ensuring schema...")
         await ensure_schema(conn)
@@ -449,6 +452,21 @@ async def sync_markets(active_only: bool = False, limit: int = None):
                 success += 1
             else:
                 failed += 1
+
+        # Mark markets NOT seen in this sync as stale (closed)
+        # Only if we fetched active markets (otherwise we'd mark everything as stale)
+        if active_only:
+            print("Marking unseen markets as stale...")
+            stale_result = await conn.execute("""
+                UPDATE explorer_markets
+                SET status = 'stale',
+                    active = false
+                WHERE updated_at < $1
+                  AND status = 'active'
+                  AND active = true
+            """, sync_start)
+            stale_count = int(stale_result.split()[-1]) if stale_result else 0
+            print(f"  Marked {stale_count} markets as stale")
 
     await pool.close()
 

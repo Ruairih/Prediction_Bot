@@ -72,9 +72,11 @@ class SortOrder:
     VALID_FIELDS = frozenset([
         "volume_24h",
         "volume_7d",
+        "volume_num",      # Total/lifetime volume
         "open_interest",
         "liquidity_score",
         "yes_price",
+        "spread",          # Best ask - best bid
         "end_time",
         "created_at",
         "updated_at",
@@ -325,34 +327,87 @@ class MarketRepository:
             total_pages=total_pages,
         )
 
-    async def get_categories(self, resolved: Optional[bool] = None) -> dict[str, int]:
+    async def get_categories(
+        self,
+        resolved: Optional[bool] = None,
+        active_only: bool = True,
+    ) -> dict[str, int]:
         """Get all categories with their market counts.
 
         Args:
             resolved: If provided, filter by resolved status
+            active_only: If True, only count active markets (default: True)
 
         Returns:
             Dict mapping category name to count
         """
-        if resolved is None:
-            query = """
-                SELECT category, COUNT(*) as count
-                FROM explorer_markets
-                WHERE category IS NOT NULL
-                GROUP BY category
-                ORDER BY count DESC
-            """
-            rows = await self._db.fetch(query)
-        else:
-            query = """
-                SELECT category, COUNT(*) as count
-                FROM explorer_markets
-                WHERE category IS NOT NULL AND resolved = $1
-                GROUP BY category
-                ORDER BY count DESC
-            """
-            rows = await self._db.fetch(query, resolved)
+        conditions = ["category IS NOT NULL"]
+        params = []
+        param_idx = 1
+
+        if active_only:
+            conditions.append("(status = 'active' AND (active = true OR active IS NULL))")
+
+        if resolved is not None:
+            conditions.append(f"resolved = ${param_idx}")
+            params.append(resolved)
+            param_idx += 1
+
+        where_clause = " AND ".join(conditions)
+        query = f"""
+            SELECT category, COUNT(*) as count
+            FROM explorer_markets
+            WHERE {where_clause}
+            GROUP BY category
+            ORDER BY count DESC
+        """
+        rows = await self._db.fetch(query, *params)
         return {row["category"]: row["count"] for row in rows}
+
+    async def get_categories_detailed(
+        self,
+        active_only: bool = True,
+        min_markets: int = 1,
+    ) -> list[dict]:
+        """Get detailed category stats including volume and liquidity.
+
+        Args:
+            active_only: If True, only count active markets
+            min_markets: Minimum number of markets to include category
+
+        Returns:
+            List of category stats dicts
+        """
+        active_filter = ""
+        if active_only:
+            active_filter = "AND (status = 'active' AND (active = true OR active IS NULL))"
+
+        query = f"""
+            SELECT
+                category,
+                COUNT(*) as market_count,
+                COALESCE(SUM(volume_24h), 0) as total_volume_24h,
+                COALESCE(SUM(liquidity_score), 0) as total_liquidity,
+                COALESCE(AVG(yes_price), 0) as avg_price,
+                COUNT(*) FILTER (WHERE volume_24h > 0) as active_markets
+            FROM explorer_markets
+            WHERE category IS NOT NULL {active_filter}
+            GROUP BY category
+            HAVING COUNT(*) >= $1
+            ORDER BY COALESCE(SUM(volume_24h), 0) DESC
+        """
+        rows = await self._db.fetch(query, min_markets)
+        return [
+            {
+                "category": row["category"],
+                "market_count": row["market_count"],
+                "total_volume_24h": float(row["total_volume_24h"] or 0),
+                "total_liquidity": float(row["total_liquidity"] or 0),
+                "avg_price": float(row["avg_price"] or 0),
+                "active_markets": row["active_markets"],
+            }
+            for row in rows
+        ]
 
     async def search_markets(
         self,

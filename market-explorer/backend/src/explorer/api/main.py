@@ -314,9 +314,38 @@ async def get_market_by_id(
 async def get_categories(
     repo: Annotated[MarketRepository, Depends(get_market_repo)],
     resolved: Annotated[Optional[bool], Query(description="Filter by resolved status")] = None,
+    include_closed: Annotated[bool, Query(description="Include closed/resolved markets")] = False,
 ) -> dict[str, int]:
     """Get all categories with their market counts."""
-    return await repo.get_categories(resolved=resolved)
+    return await repo.get_categories(resolved=resolved, active_only=not include_closed)
+
+
+class CategoryDetailResponse(BaseModel):
+    """Detailed category statistics."""
+
+    category: str
+    market_count: int
+    total_volume_24h: float
+    total_liquidity: float
+    avg_price: float
+    active_markets: int
+
+
+@app.get("/api/categories/detailed", response_model=list[CategoryDetailResponse])
+async def get_categories_detailed(
+    repo: Annotated[MarketRepository, Depends(get_market_repo)],
+    include_closed: Annotated[bool, Query(description="Include closed/resolved markets")] = False,
+    min_markets: Annotated[int, Query(ge=1, description="Minimum markets per category")] = 1,
+) -> list[CategoryDetailResponse]:
+    """Get detailed category stats with volume and liquidity totals.
+
+    Returns categories sorted by total 24h volume descending.
+    """
+    cats = await repo.get_categories_detailed(
+        active_only=not include_closed,
+        min_markets=min_markets,
+    )
+    return [CategoryDetailResponse(**c) for c in cats]
 
 
 @app.get("/api/events/{event_id}/markets")
