@@ -1,0 +1,60 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom scrollbar for dark mode */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1f2937;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #4b5563;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #6b7280;
+}
+
+/* Dense table styles */
+.table-dense td,
+.table-dense th {
+  @apply px-2 py-1 text-sm;
+}
+
+/* Sparkline container */
+.sparkline {
+  height: 20px;
+  width: 60px;
+}
+
+/* Price change colors */
+.price-up {
+  @apply text-pm-green;
+}
+
+.price-down {
+  @apply text-pm-red;
+}
+
+/* Status badges */
+.badge {
+  @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-medium;
+}
+
+.badge-active {
+  @apply bg-green-900 text-green-300;
+}
+
+.badge-resolving {
+  @apply bg-yellow-900 text-yellow-300;
+}
+
+.badge-resolved {
+  @apply bg-gray-700 text-gray-300;
+}

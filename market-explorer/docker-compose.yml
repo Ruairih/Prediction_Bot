@@ -1,0 +1,86 @@
+version: '3.8'
+
+# Market Explorer Docker Compose
+# Run with: docker-compose -f market-explorer/docker-compose.yml up
+
+services:
+  # FastAPI Backend API
+  explorer-api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - EXPLORER_DATABASE_URL=postgresql://predict:predict@postgres:5432/predict
+      - EXPLORER_API_HOST=0.0.0.0
+      - EXPLORER_API_PORT=8000
+      - EXPLORER_CORS_ORIGINS=["http://localhost:3000","http://localhost:3004","http://localhost:5173"]
+    depends_on:
+      - postgres
+    networks:
+      - explorer-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Background Sync Service
+  explorer-sync:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: python -m explorer.services.sync_service
+    environment:
+      - EXPLORER_DATABASE_URL=postgresql://predict:predict@postgres:5432/predict
+      - SYNC_INTERVAL_SECONDS=300
+      - SYNC_PRICE_INTERVAL_SECONDS=30
+    depends_on:
+      - postgres
+    networks:
+      - explorer-net
+    restart: unless-stopped
+
+  # React Frontend
+  explorer-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3004:3000"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - explorer-api
+    networks:
+      - explorer-net
+    restart: unless-stopped
+
+  # PostgreSQL (if not using external)
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: predict
+      POSTGRES_PASSWORD: predict
+      POSTGRES_DB: predict
+    volumes:
+      - explorer-pgdata:/var/lib/postgresql/data
+      - ../shared/migrations:/docker-entrypoint-initdb.d
+    ports:
+      - "5433:5432"
+    networks:
+      - explorer-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U predict"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+networks:
+  explorer-net:
+    driver: bridge
+
+volumes:
+  explorer-pgdata:
