@@ -1,7 +1,7 @@
 /**
  * Top Status Bar Component
  *
- * Always visible command bar showing mode, health, and controls.
+ * Premium always-visible command bar showing mode, health, and controls.
  */
 import clsx from 'clsx';
 import { formatDistanceToNowStrict } from 'date-fns';
@@ -36,11 +36,30 @@ export function StatusBar({
   onCloseAll,
   onKillSwitch,
 }: StatusBarProps) {
-  const modeDisplay = {
-    live: { text: 'LIVE', color: 'bg-accent-red text-white' },
-    dry_run: { text: 'PAPER', color: 'bg-accent-yellow text-white' },
-    paused: { text: 'PAUSED', color: 'bg-accent-purple text-white' },
-    stopped: { text: 'OFFLINE', color: 'bg-border text-text-primary' },
+  // wsConnected available for future use
+  void wsConnected;
+
+  const modeConfig = {
+    live: {
+      text: 'LIVE',
+      className: 'bg-negative text-white shadow-glow-negative',
+      pulse: true
+    },
+    dry_run: {
+      text: 'PAPER',
+      className: 'bg-warning text-black',
+      pulse: false
+    },
+    paused: {
+      text: 'PAUSED',
+      className: 'bg-accent-secondary text-white',
+      pulse: false
+    },
+    stopped: {
+      text: 'OFFLINE',
+      className: 'bg-bg-tertiary text-text-secondary border border-border',
+      pulse: false
+    },
   }[mode];
 
   let heartbeatLabel = 'n/a';
@@ -51,111 +70,137 @@ export function StatusBar({
     }
   }
 
-  const healthColor = {
-    healthy: 'text-accent-green',
-    degraded: 'text-accent-yellow',
-    unhealthy: 'text-accent-red',
-    unknown: 'text-text-secondary',
+  const healthConfig = {
+    healthy: { color: 'text-positive', dot: 'bg-positive' },
+    degraded: { color: 'text-warning', dot: 'bg-warning' },
+    unhealthy: { color: 'text-negative', dot: 'bg-negative' },
+    unknown: { color: 'text-text-muted', dot: 'bg-text-muted' },
   }[healthStatus ?? 'unknown'];
 
   return (
-    <header className="h-16 bg-bg-secondary/90 border-b border-border flex items-center justify-between px-6 backdrop-blur">
-      {/* Left: Mode + health */}
+    <header className="relative h-14 bg-bg-secondary/95 border-b border-border flex items-center justify-between px-4 backdrop-blur-glass">
+      {/* Decorative gradient line */}
+      <div className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-accent-primary/30 to-transparent" />
+
+      {/* Left: Mode + health indicators */}
       <div className="flex items-center gap-4">
+        {/* Mode badge */}
         <div
           data-testid="mode-indicator"
           className={clsx(
-            'px-3 py-1 rounded-full text-xs font-semibold tracking-widest',
-            modeDisplay.color
+            'relative px-3 py-1 rounded-md text-[10px] font-bold tracking-[0.15em]',
+            modeConfig.className
           )}
         >
-          {modeDisplay.text}
+          {modeConfig.pulse && (
+            <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-negative animate-ping" />
+          )}
+          {modeConfig.text}
         </div>
 
-        <div className="flex items-center gap-2 text-sm text-text-secondary">
-          <span
-            className={clsx(
-              'h-2 w-2 rounded-full',
-              isConnected ? 'bg-accent-green' : 'bg-accent-red'
-            )}
-          />
-          <span>{isConnected ? 'Live feed' : 'Feed down'}</span>
-          <span className="text-text-secondary/70">|</span>
-          <span>Heartbeat {heartbeatLabel}</span>
-          {healthStatus && (
-            <>
-              <span className="text-text-secondary/70">|</span>
-              <span className={healthColor}>System {healthStatus}</span>
-            </>
-          )}
+        {/* Status indicators */}
+        <div className="hidden sm:flex items-center gap-3 text-xs">
+          {/* Connection status */}
+          <div className="flex items-center gap-1.5">
+            <span className={clsx(
+              'w-1.5 h-1.5 rounded-full',
+              isConnected ? 'bg-positive' : 'bg-negative'
+            )} />
+            <span className={isConnected ? 'text-text-secondary' : 'text-negative'}>
+              {isConnected ? 'Connected' : 'Disconnected'}
+            </span>
+          </div>
+
+          <span className="text-border">•</span>
+
+          {/* System health */}
+          <div className="flex items-center gap-1.5">
+            <span className={clsx('w-1.5 h-1.5 rounded-full', healthConfig.dot)} />
+            <span className={healthConfig.color}>
+              {healthStatus ?? 'Unknown'}
+            </span>
+          </div>
+
+          {/* DB Latency */}
           {typeof dbLatencyMs === 'number' && (
             <>
-              <span className="text-text-secondary/70">|</span>
-              <span>DB {Math.round(dbLatencyMs)}ms</span>
-            </>
-          )}
-          {typeof wsConnected === 'boolean' && (
-            <>
-              <span className="text-text-secondary/70">|</span>
-              <span className={wsConnected ? 'text-accent-green' : 'text-accent-red'}>
-                WS {wsConnected ? 'ok' : 'down'}
+              <span className="text-border">•</span>
+              <span className={clsx(
+                'font-mono',
+                dbLatencyMs < 50 ? 'text-positive' : dbLatencyMs < 100 ? 'text-warning' : 'text-negative'
+              )}>
+                {Math.round(dbLatencyMs)}ms
               </span>
             </>
           )}
+
+          {/* Heartbeat */}
+          <span className="hidden lg:flex items-center gap-1 text-text-muted">
+            <span className="text-border">•</span>
+            <span>↻ {heartbeatLabel}</span>
+          </span>
         </div>
       </div>
 
-      {/* Center: Title */}
-      <div className="hidden lg:flex items-center gap-3 text-sm text-text-secondary">
-        <span className="uppercase tracking-[0.3em] text-[10px] text-text-secondary/70">
-          Polymarket
-        </span>
-        <span className="text-text-primary font-semibold">Trading Command</span>
+      {/* Center: Branding (hidden on small screens) */}
+      <div className="hidden xl:flex items-center gap-2">
+        <div className="w-6 h-6 rounded-md bg-gradient-primary flex items-center justify-center text-white text-xs font-bold">
+          P
+        </div>
+        <div>
+          <div className="text-[9px] uppercase tracking-[0.3em] text-text-muted">Trading</div>
+          <div className="text-sm font-semibold text-text-primary -mt-0.5">Command Desk</div>
+        </div>
       </div>
 
       {/* Right: Balance + controls */}
-      <div className="flex items-center gap-3">
-        <div data-testid="balance-display" className="text-sm">
-          <div className="text-text-secondary text-[11px] uppercase tracking-[0.2em]">
+      <div className="flex items-center gap-4">
+        {/* Balance display */}
+        <div data-testid="balance-display" className="text-right">
+          <div className="text-[9px] uppercase tracking-[0.2em] text-text-muted">
             Available
           </div>
-          <div className="text-text-primary font-semibold tabular-nums">
-            ${balance.toFixed(2)} USDC
+          <div className="text-sm font-semibold text-text-primary tabular-nums">
+            ${balance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        {/* Control buttons */}
+        <div className="flex items-center gap-1.5">
           {mode === 'paused' ? (
             <button
               onClick={onResume}
-              className="px-3 py-1 text-xs font-semibold border border-border rounded-full hover:border-accent-blue hover:text-accent-blue transition-colors"
+              className="btn btn-secondary text-xs py-1.5 px-3"
             >
               Resume
             </button>
           ) : (
             <button
               onClick={onPause}
-              className="px-3 py-1 text-xs font-semibold border border-border rounded-full hover:border-accent-blue hover:text-accent-blue transition-colors"
+              className="btn btn-ghost text-xs py-1.5 px-3"
             >
               Pause
             </button>
           )}
+
           <button
             onClick={onCancelAll}
-            className="px-3 py-1 text-xs font-semibold border border-border rounded-full hover:border-accent-yellow hover:text-accent-yellow transition-colors"
+            className="btn btn-ghost text-xs py-1.5 px-3 hidden md:flex"
           >
-            Cancel All
+            Cancel
           </button>
+
           <button
             onClick={onCloseAll}
-            className="px-3 py-1 text-xs font-semibold border border-border rounded-full hover:border-accent-red hover:text-accent-red transition-colors"
+            className="btn btn-ghost text-xs py-1.5 px-3 text-warning hover:text-warning hidden md:flex"
           >
             Flatten
           </button>
+
           {mode === 'live' && onKillSwitch && (
             <button
               onClick={onKillSwitch}
-              className="px-3 py-1 text-xs font-semibold bg-accent-red text-white rounded-full hover:bg-accent-red/90 transition-colors"
+              className="btn btn-danger text-xs py-1.5 px-3"
             >
               Kill
             </button>

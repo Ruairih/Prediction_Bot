@@ -2,10 +2,12 @@
  * Main Application Component
  *
  * Root component with routing and layout structure.
+ * Features a premium multi-theme design system.
  */
 import { useState } from 'react';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query';
+import { ThemeProvider } from './contexts/ThemeContext';
 import { Sidebar } from './components/common/Sidebar';
 import { StatusBar } from './components/common/StatusBar';
 import { Overview } from './pages/Overview';
@@ -140,12 +142,14 @@ function AppContent() {
 }
 
 /**
- * Main App component with QueryClientProvider wrapper
+ * Main App component with QueryClientProvider and ThemeProvider wrappers
  */
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <AppContent />
+      <ThemeProvider>
+        <AppContent />
+      </ThemeProvider>
     </QueryClientProvider>
   );
 }
