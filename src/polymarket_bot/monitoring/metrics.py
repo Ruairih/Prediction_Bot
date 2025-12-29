@@ -121,7 +121,7 @@ class MetricsCollector:
         Calculate unrealized P&L from open positions.
 
         Args:
-            current_prices: Dict of token_id -> current price
+            current_prices: Dict of token_id -> current price (optional, uses stored values if None)
 
         Returns:
             Sum of unrealized P&L
@@ -129,8 +129,19 @@ class MetricsCollector:
         if not self._db:
             return Decimal("0")
 
+        # First, try to sum the stored unrealized_pnl from positions
+        # This is more reliable as it's updated by the ingestion layer
+        query_stored = """
+            SELECT COALESCE(SUM(unrealized_pnl), 0) as total
+            FROM positions
+            WHERE status = 'open' AND unrealized_pnl IS NOT NULL
+        """
+        result = await self._db.fetchrow(query_stored)
+        if result and result["total"] is not None and result["total"] != 0:
+            return Decimal(str(result["total"]))
+
+        # Fallback: calculate from current prices if provided
         if current_prices is None:
-            # Without prices, we can't calculate unrealized P&L
             return Decimal("0")
 
         query = """

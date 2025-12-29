@@ -1,6 +1,6 @@
 import { ReactNode } from 'react'
 import { Link, useLocation } from 'react-router-dom'
-import { BarChart3, Search, Star, Settings } from 'lucide-react'
+import { BarChart3, Search, Star, Settings, Layers } from 'lucide-react'
 
 interface LayoutProps {
   children: ReactNode
@@ -8,6 +8,7 @@ interface LayoutProps {
 
 const navItems = [
   { path: '/', label: 'Markets', icon: BarChart3 },
+  { path: '/events', label: 'Events', icon: Layers },
   { path: '/watchlist', label: 'Watchlist', icon: Star },
   { path: '/settings', label: 'Settings', icon: Settings },
 ]

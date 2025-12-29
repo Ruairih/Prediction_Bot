@@ -2,7 +2,7 @@
  * E2E Tests for Activity Page
  * TDD - Tests written first
  */
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures';
 
 test.describe('Activity Page', () => {
   test.beforeEach(async ({ page }) => {
@@ -14,7 +14,7 @@ test.describe('Activity Page', () => {
   // =========================================================================
 
   test('should display page title', async ({ page }) => {
-    await expect(page.getByRole('heading', { name: /activity/i })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /^activity$/i })).toBeVisible();
   });
 
   test('should show activity stats', async ({ page }) => {

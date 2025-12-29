@@ -62,8 +62,8 @@ export function useBotStatus() {
   return useQuery({
     queryKey: queryKeys.status,
     queryFn: fetchBotStatus,
-    refetchInterval: 10000,  // Refetch every 10 seconds
-    staleTime: 5000,
+    refetchInterval: 30000,  // Refetch every 30 seconds (was 10s)
+    staleTime: 15000,
     retry: 2,
   });
 }
@@ -140,8 +140,8 @@ export function useActivity(limit = 20) {
   return useQuery({
     queryKey: [...queryKeys.activity, limit],
     queryFn: () => fetchActivity(limit),
-    refetchInterval: 10000,  // Refetch every 10 seconds
-    staleTime: 5000,
+    refetchInterval: 30000,  // Refetch every 30 seconds (was 10s)
+    staleTime: 15000,
     retry: 2,
   });
 }
@@ -280,8 +280,8 @@ export function useDashboardData() {
   return useQuery({
     queryKey: queryKeys.dashboard,
     queryFn: fetchDashboardData,
-    refetchInterval: 10000,
-    staleTime: 5000,
+    refetchInterval: 30000,  // Refetch every 30 seconds (was 10s)
+    staleTime: 15000,
     retry: 2,
   });
 }
@@ -324,8 +324,8 @@ export function usePipelineFunnel(minutes = 60) {
   return useQuery({
     queryKey: [...queryKeys.pipelineFunnel, minutes],
     queryFn: () => fetchPipelineFunnel(minutes),
-    refetchInterval: 10000,
-    staleTime: 5000,
+    refetchInterval: 60000,  // Refetch every 60 seconds (was 10s - too aggressive)
+    staleTime: 30000,
     retry: 1,
   });
 }
@@ -337,8 +337,8 @@ export function usePipelineRejections(limit = 100, stage?: RejectionStage) {
   return useQuery({
     queryKey: [...queryKeys.pipelineRejections, limit, stage],
     queryFn: () => fetchPipelineRejections(limit, stage),
-    refetchInterval: 15000,
-    staleTime: 5000,
+    refetchInterval: 60000,  // Refetch every 60 seconds (was 15s)
+    staleTime: 30000,
     retry: 1,
   });
 }
@@ -350,8 +350,8 @@ export function usePipelineCandidates(limit = 50, sortBy: 'distance' | 'score' |
   return useQuery({
     queryKey: [...queryKeys.pipelineCandidates, limit, sortBy],
     queryFn: () => fetchPipelineCandidates(limit, sortBy),
-    refetchInterval: 15000,
-    staleTime: 5000,
+    refetchInterval: 60000,  // Refetch every 60 seconds (was 15s)
+    staleTime: 30000,
     retry: 1,
   });
 }
@@ -363,8 +363,8 @@ export function useNearMisses(maxDistance = 0.02) {
   return useQuery({
     queryKey: [...queryKeys.nearMisses, maxDistance],
     queryFn: () => fetchNearMisses(maxDistance),
-    refetchInterval: 15000,
-    staleTime: 5000,
+    refetchInterval: 60000,  // Refetch every 60 seconds (was 15s)
+    staleTime: 30000,
     retry: 1,
   });
 }

@@ -22,6 +22,8 @@ export function Risk() {
   const currentExposure = riskData?.currentExposure ?? 0;
   const exposurePercent = riskData?.exposurePercent ?? 0;
   const leverage = exposurePercent > 0 ? exposurePercent / 100 : 0;
+  // Calculate total deployable capital from exposure and exposure percent
+  const totalAssets = exposurePercent > 0 ? (currentExposure / exposurePercent) * 100 : 0;
 
   const alerts = useMemo(() => {
     const result: { message: string; severity: 'warning' | 'critical' }[] = [];

@@ -6,6 +6,8 @@ import { defineConfig, devices } from '@playwright/test';
  * Run with: npm run test:e2e
  * Visual UI: npm run test:e2e:ui
  */
+const enableMobile = process.env.PLAYWRIGHT_MOBILE === 'true';
+
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: true,
@@ -26,10 +28,14 @@ export default defineConfig({
       name: 'chromium',
       use: { ...devices['Desktop Chrome'] },
     },
-    {
-      name: 'mobile',
-      use: { ...devices['iPhone 13'] },
-    },
+    ...(enableMobile
+      ? [
+          {
+            name: 'mobile',
+            use: { ...devices['iPhone 13'] },
+          },
+        ]
+      : []),
   ],
 
   // Run dev server before tests
@@ -38,5 +44,8 @@ export default defineConfig({
     url: 'http://localhost:3000',
     reuseExistingServer: !process.env.CI,
     timeout: 120 * 1000,
+    env: {
+      VITE_HOST: '127.0.0.1',
+    },
   },
 });

@@ -4,14 +4,17 @@
  */
 import { useSearchParams } from 'react-router-dom';
 import { TimeRangeSelector } from '../components/performance/TimeRangeSelector';
-import { EquityCurveChart } from '../components/performance/EquityCurveChart';
-import { PerformanceKpis } from '../components/performance/PerformanceKpis';
-import { WinLossStats } from '../components/performance/WinLossStats';
-import { TradeHistoryTable } from '../components/performance/TradeHistoryTable';
-import { PnlBreakdown } from '../components/performance/PnlBreakdown';
+import {
+  EquityCurveChart,
+  PerformanceKpis,
+  WinLossStats,
+  TradeHistoryTable,
+  PnlBreakdown,
+  ExecutionQualityPanel,
+} from '../components/performance';
 import { Pagination } from '../components/common/Pagination';
 import { EmptyState } from '../components/common/EmptyState';
-import { usePerformance } from '../hooks/useDashboardData';
+import { usePerformance, useOrders } from '../hooks/useDashboardData';
 import type { TimeRange } from '../types';
 
 const PAGE_SIZE = 10;
@@ -23,6 +26,7 @@ export function Performance() {
   const rawPage = parseInt(searchParams.get('page') || '1', 10);
   const rangeDays = range === '1d' ? 1 : range === '7d' ? 7 : range === '30d' ? 30 : range === '90d' ? 90 : undefined;
   const { data: performanceData, isLoading, error } = usePerformance(rangeDays, 200);
+  const { data: ordersData } = useOrders(200);
 
   const stats = performanceData?.stats ?? {
     totalPnl: 0,
@@ -39,6 +43,7 @@ export function Performance() {
   };
   const equityData = performanceData?.equity ?? [];
   const trades = performanceData?.trades ?? [];
+  const orders = ordersData ?? [];
   const pnlDaily = performanceData?.pnl.daily ?? [];
   const pnlWeekly = performanceData?.pnl.weekly ?? [];
   const pnlMonthly = performanceData?.pnl.monthly ?? [];
@@ -93,8 +98,9 @@ export function Performance() {
         <div className="lg:col-span-2">
           <EquityCurveChart data={equityData} />
         </div>
-        <div>
+        <div className="space-y-6">
           <WinLossStats stats={stats} />
+          <ExecutionQualityPanel orders={orders} />
         </div>
       </div>
 

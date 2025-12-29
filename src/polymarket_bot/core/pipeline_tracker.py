@@ -64,6 +64,7 @@ class RejectionEvent:
     trade_size: Optional[Decimal] = None
     trade_age_seconds: Optional[float] = None
     rejection_values: dict = field(default_factory=dict)
+    outcome: Optional[str] = None  # "Yes" or "No" - the direction of the trade
 
     def to_dict(self) -> dict:
         """Convert to JSON-serializable dict."""
@@ -77,12 +78,44 @@ class RejectionEvent:
             "trade_size": float(self.trade_size) if self.trade_size else None,
             "trade_age_seconds": self.trade_age_seconds,
             "rejection_values": self.rejection_values,
+            "outcome": self.outcome,
+            "rejection_reason": self._format_rejection_reason(),
         }
+
+    def _format_rejection_reason(self) -> str:
+        """Format human-readable rejection reason based on stage and values."""
+        stage_reasons = {
+            RejectionStage.THRESHOLD: lambda v: f"Price {v.get('price', '?')} below threshold {v.get('threshold', '0.95')}",
+            RejectionStage.DUPLICATE: lambda v: f"Already triggered at {v.get('first_trigger_time', 'earlier')}",
+            RejectionStage.G1_TRADE_AGE: lambda v: f"Trade data {v.get('age_seconds', '?')}s old (max {v.get('max_age', 300)}s)",
+            RejectionStage.G5_ORDERBOOK: lambda v: f"Orderbook price {v.get('orderbook_price', '?')} differs from trigger {v.get('trigger_price', '?')} by {v.get('deviation_pct', '?')}%",
+            RejectionStage.G6_WEATHER: lambda v: "Weather-related market (filtered)",
+            RejectionStage.TIME_TO_END: lambda v: f"Only {v.get('hours_remaining', '?')} hours until expiry (min {v.get('min_hours', 6)}h)",
+            RejectionStage.TRADE_SIZE: lambda v: f"Trade size {v.get('size', '?')} below minimum {v.get('min_size', 50)}",
+            RejectionStage.CATEGORY: lambda v: f"Category '{v.get('category', '?')}' is blocked",
+            RejectionStage.MANUAL_BLOCK: lambda v: f"Manually blocked: {v.get('reason', 'no reason given')}",
+            RejectionStage.MAX_POSITIONS: lambda v: f"At position limit ({v.get('current', '?')}/{v.get('max', '?')})",
+            RejectionStage.STRATEGY_HOLD: lambda v: f"Strategy holding: {v.get('reason', 'conditions not met')}",
+            RejectionStage.STRATEGY_IGNORE: lambda v: f"Strategy ignored: {v.get('reason', 'not a target')}",
+        }
+        formatter = stage_reasons.get(self.stage, lambda v: str(v))
+        try:
+            return formatter(self.rejection_values)
+        except Exception:
+            return f"Rejected at {self.stage.value}"
 
 
 @dataclass
 class CandidateMarket:
-    """A market that passed filters but didn't trigger entry."""
+    """A market that passed filters but didn't trigger entry.
+
+    Candidates are markets that:
+    - Met all filter criteria (G1, G5, G6, category, etc.)
+    - Have a price approaching but not yet reaching the entry threshold
+    - Are being actively monitored for potential entry
+
+    These are "watching" markets that may trigger a trade soon.
+    """
 
     token_id: str
     condition_id: str
@@ -98,14 +131,38 @@ class CandidateMarket:
     trade_age_seconds: float = 0
     highest_price_seen: Decimal = Decimal("0")
     times_evaluated: int = 0
+    outcome: Optional[str] = None  # "Yes" or "No" - which outcome token this is
 
     @property
     def distance_to_threshold(self) -> Decimal:
-        """How far from triggering (0 = at threshold)."""
-        return max(Decimal("0"), self.threshold - self.current_price)
+        """How far from threshold (0 = at threshold, negative = above)."""
+        return self.threshold - self.current_price
+
+    @property
+    def is_above_threshold(self) -> bool:
+        """Whether price is at or above threshold (triggered)."""
+        return self.current_price >= self.threshold
+
+    @property
+    def is_near_miss(self) -> bool:
+        """
+        Whether this is a near miss - triggered but strategy didn't trade.
+
+        A 'near miss' means the price hit threshold but the strategy chose
+        not to enter (returned HOLD/WATCHLIST instead of ENTRY).
+        """
+        return self.is_above_threshold
 
     def to_dict(self) -> dict:
         """Convert to JSON-serializable dict."""
+        # Determine status label based on price vs threshold
+        if self.is_above_threshold:
+            status_label = "Triggered (Held)"  # Hit threshold, strategy held
+        elif abs(self.distance_to_threshold) <= Decimal("0.02"):
+            status_label = "Very Close"  # Within 2% of threshold
+        else:
+            status_label = "Watching"  # Further from threshold
+
         return {
             "token_id": self.token_id,
             "condition_id": self.condition_id,
@@ -122,6 +179,10 @@ class CandidateMarket:
             "trade_age_seconds": self.trade_age_seconds,
             "highest_price_seen": float(self.highest_price_seen),
             "times_evaluated": self.times_evaluated,
+            "outcome": self.outcome,
+            "is_near_miss": self.is_near_miss,
+            "is_above_threshold": self.is_above_threshold,
+            "status_label": status_label,
         }
 
 
@@ -203,6 +264,7 @@ class PipelineTracker:
         trade_size: Optional[Decimal] = None,
         trade_age_seconds: Optional[float] = None,
         rejection_values: Optional[dict] = None,
+        outcome: Optional[str] = None,
     ) -> None:
         """
         Record a pipeline rejection.
@@ -216,6 +278,7 @@ class PipelineTracker:
             trade_size: Trade size if available
             trade_age_seconds: Age of trade data if relevant (G1)
             rejection_values: Extra details about why rejected
+            outcome: "Yes" or "No" - which outcome token this is
         """
         now = datetime.now(timezone.utc)
         minute_bucket = now.strftime("%Y-%m-%d %H:%M")
@@ -246,6 +309,7 @@ class PipelineTracker:
                 trade_size=trade_size,
                 trade_age_seconds=trade_age_seconds,
                 rejection_values=rejection_values or {},
+                outcome=outcome,
             )
             with self._recent_lock:
                 self._recent_rejections.append(event)
@@ -263,6 +327,7 @@ class PipelineTracker:
         time_to_end_hours: float = 0,
         trade_size: Optional[Decimal] = None,
         trade_age_seconds: float = 0,
+        outcome: Optional[str] = None,
     ) -> None:
         """
         Update or create a candidate market entry.
@@ -281,6 +346,7 @@ class PipelineTracker:
             time_to_end_hours: Hours until market ends
             trade_size: Recent trade size
             trade_age_seconds: Age of trade data
+            outcome: "Yes" or "No" - which outcome token this is
         """
         now = datetime.now(timezone.utc)
 
@@ -297,6 +363,8 @@ class PipelineTracker:
                 candidate.trade_size = trade_size
                 candidate.trade_age_seconds = trade_age_seconds
                 candidate.times_evaluated += 1
+                if outcome:
+                    candidate.outcome = outcome
                 if price > candidate.highest_price_seen:
                     candidate.highest_price_seen = price
             else:
@@ -324,6 +392,7 @@ class PipelineTracker:
                     trade_age_seconds=trade_age_seconds,
                     highest_price_seen=price,
                     times_evaluated=1,
+                    outcome=outcome,
                 )
 
     def remove_candidate(self, condition_id: str) -> None:
@@ -422,18 +491,22 @@ class PipelineTracker:
 
     def get_near_misses(self, max_distance: Decimal = Decimal("0.02")) -> list[CandidateMarket]:
         """
-        Get markets that came very close to triggering.
+        Get markets that triggered but strategy held (near misses).
+
+        A near miss is a market where:
+        - Price reached or exceeded threshold (distance_to_threshold <= 0)
+        - Strategy chose not to enter (returned HOLD/WATCHLIST)
 
         Args:
-            max_distance: Max distance from threshold (e.g., 0.02 = within 2%)
+            max_distance: Ignored (kept for API compatibility)
 
         Returns:
-            Candidates within max_distance of threshold
+            Candidates that triggered but were held
         """
         with self._candidate_lock:
             return [
                 c for c in self._candidates.values()
-                if c.distance_to_threshold <= max_distance
+                if c.is_above_threshold  # Price >= threshold
             ]
 
     def get_funnel_summary(self, minutes: int = 60) -> dict:

@@ -391,6 +391,186 @@ async def get_event_markets(
     return [market_to_response(m) for m in markets]
 
 
+# =============================================================================
+# Events Endpoints (Aggregated View)
+# =============================================================================
+
+
+class EventResponse(BaseModel):
+    """Event response with aggregated metrics."""
+
+    event_id: str
+    title: str
+    slug: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    image: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    volume: float  # Total lifetime volume
+    volume_24h: float
+    volume_7d: float
+    liquidity: float
+    market_count: int
+    active_market_count: int
+    active: bool
+    closed: bool
+
+
+class PaginatedEventsResponse(BaseModel):
+    """Paginated events response."""
+
+    items: list[EventResponse]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    has_next: bool
+    has_prev: bool
+
+
+@app.get("/api/events", response_model=PaginatedEventsResponse)
+async def list_events(
+    category: Annotated[Optional[str], Query(description="Filter by category")] = None,
+    search: Annotated[Optional[str], Query(min_length=2, description="Search event titles")] = None,
+    active_only: Annotated[bool, Query(description="Only show active events")] = True,
+    min_volume: Annotated[Optional[float], Query(ge=0, description="Minimum total volume")] = None,
+    sort_by: Annotated[str, Query(description="Sort field: volume, volume_24h, market_count")] = "volume",
+    sort_desc: Annotated[bool, Query(description="Sort descending")] = True,
+    page: Annotated[int, Query(ge=1, description="Page number")] = 1,
+    page_size: Annotated[int, Query(ge=1, le=200, description="Items per page")] = 50,
+) -> PaginatedEventsResponse:
+    """List events with aggregated volume metrics.
+
+    Events group multiple related markets. For example, "2028 Democratic Presidential Nominee"
+    contains 128 individual candidate markets with a combined $412M volume.
+    """
+    # Build query
+    conditions = []
+    params = []
+    param_idx = 1
+
+    if active_only:
+        conditions.append("active = true AND closed = false")
+
+    if category:
+        conditions.append(f"category ILIKE ${param_idx}")
+        params.append(f"%{category}%")
+        param_idx += 1
+
+    if search:
+        conditions.append(f"title ILIKE ${param_idx}")
+        params.append(f"%{search}%")
+        param_idx += 1
+
+    if min_volume is not None:
+        conditions.append(f"volume >= ${param_idx}")
+        params.append(min_volume)
+        param_idx += 1
+
+    where_clause = ""
+    if conditions:
+        where_clause = "WHERE " + " AND ".join(conditions)
+
+    # Validate sort field
+    valid_sort_fields = {"volume", "volume_24h", "volume_7d", "market_count", "liquidity", "end_date"}
+    if sort_by not in valid_sort_fields:
+        sort_by = "volume"
+
+    direction = "DESC" if sort_desc else "ASC"
+
+    # Count total
+    count_query = f"SELECT COUNT(*) FROM explorer_events {where_clause}"
+    total = await db.fetchval(count_query, *params)
+    total = total or 0
+
+    # Calculate pagination
+    from math import ceil
+    total_pages = max(1, ceil(total / page_size))
+    offset = (page - 1) * page_size
+
+    # Main query
+    query = f"""
+        SELECT event_id, title, slug, description, category, image,
+               start_date, end_date, volume, volume_24h, volume_7d,
+               liquidity, market_count, active_market_count, active, closed
+        FROM explorer_events
+        {where_clause}
+        ORDER BY {sort_by} {direction} NULLS LAST
+        LIMIT ${param_idx} OFFSET ${param_idx + 1}
+    """
+    params.extend([page_size, offset])
+
+    rows = await db.fetch(query, *params)
+
+    items = [
+        EventResponse(
+            event_id=row["event_id"],
+            title=row["title"],
+            slug=row["slug"],
+            description=row["description"],
+            category=row["category"],
+            image=row["image"],
+            start_date=row["start_date"].isoformat() if row["start_date"] else None,
+            end_date=row["end_date"].isoformat() if row["end_date"] else None,
+            volume=float(row["volume"] or 0),
+            volume_24h=float(row["volume_24h"] or 0),
+            volume_7d=float(row["volume_7d"] or 0),
+            liquidity=float(row["liquidity"] or 0),
+            market_count=row["market_count"] or 0,
+            active_market_count=row["active_market_count"] or 0,
+            active=row["active"],
+            closed=row["closed"],
+        )
+        for row in rows
+    ]
+
+    return PaginatedEventsResponse(
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
+        has_next=page < total_pages,
+        has_prev=page > 1,
+    )
+
+
+@app.get("/api/events/{event_id}", response_model=EventResponse)
+async def get_event(event_id: str) -> EventResponse:
+    """Get a single event by ID."""
+    query = """
+        SELECT event_id, title, slug, description, category, image,
+               start_date, end_date, volume, volume_24h, volume_7d,
+               liquidity, market_count, active_market_count, active, closed
+        FROM explorer_events
+        WHERE event_id = $1
+    """
+    row = await db.fetchrow(query, event_id)
+
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
+
+    return EventResponse(
+        event_id=row["event_id"],
+        title=row["title"],
+        slug=row["slug"],
+        description=row["description"],
+        category=row["category"],
+        image=row["image"],
+        start_date=row["start_date"].isoformat() if row["start_date"] else None,
+        end_date=row["end_date"].isoformat() if row["end_date"] else None,
+        volume=float(row["volume"] or 0),
+        volume_24h=float(row["volume_24h"] or 0),
+        volume_7d=float(row["volume_7d"] or 0),
+        liquidity=float(row["liquidity"] or 0),
+        market_count=row["market_count"] or 0,
+        active_market_count=row["active_market_count"] or 0,
+        active=row["active"],
+        closed=row["closed"],
+    )
+
+
 class SyncStatusResponse(BaseModel):
     """Sync status response."""
 

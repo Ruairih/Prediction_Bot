@@ -4,9 +4,7 @@
  */
 import { useState, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { ActivityFilters } from '../components/activity/ActivityFilters';
-import { ActivityList } from '../components/activity/ActivityList';
-import { ActivityStats } from '../components/activity/ActivityStats';
+import { ActivityFilters, ActivityList, ActivityStats, ActivityDetailPanel } from '../components/activity';
 import { Pagination } from '../components/common/Pagination';
 import { EmptyState } from '../components/common/EmptyState';
 import { useActivity } from '../hooks/useDashboardData';
@@ -162,40 +160,7 @@ export function Activity() {
 
       {/* Activity Details Drawer */}
       {selectedEvent && (
-        <div
-          data-testid="activity-drawer"
-          className="fixed inset-y-0 right-0 w-96 bg-bg-secondary border-l border-border shadow-xl z-50"
-        >
-          <div className="flex items-center justify-between p-4 border-b border-border">
-            <h3 className="text-lg font-semibold text-text-primary">Event Details</h3>
-            <button
-              onClick={() => setSelectedEvent(null)}
-              className="text-text-secondary hover:text-text-primary"
-            >
-              ✕
-            </button>
-          </div>
-          <div className="p-4 space-y-4">
-            <div>
-              <span className="text-xs text-text-secondary uppercase">Type</span>
-              <p className="text-text-primary">{selectedEvent.type.replace(/_/g, ' ')}</p>
-            </div>
-            <div>
-              <span className="text-xs text-text-secondary uppercase">Timestamp</span>
-              <p className="text-text-primary">{new Date(selectedEvent.timestamp).toLocaleString()}</p>
-            </div>
-            <div>
-              <span className="text-xs text-text-secondary uppercase">Summary</span>
-              <p className="text-text-primary">{selectedEvent.summary}</p>
-            </div>
-            <div>
-              <span className="text-xs text-text-secondary uppercase">Details</span>
-              <pre className="mt-2 p-3 bg-bg-tertiary rounded text-xs overflow-auto text-text-primary">
-                {JSON.stringify(selectedEvent.details, null, 2)}
-              </pre>
-            </div>
-          </div>
-        </div>
+        <ActivityDetailPanel event={selectedEvent} onClose={() => setSelectedEvent(null)} />
       )}
     </div>
   );

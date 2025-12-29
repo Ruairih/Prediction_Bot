@@ -18,7 +18,7 @@ import { Strategy } from './pages/Strategy';
 import { Risk } from './pages/Risk';
 import { System } from './pages/System';
 import { Settings } from './pages/Settings';
-import { useBotStatus, useMetrics } from './hooks/useDashboardData';
+import { useBotStatus, useMetrics, useHealth } from './hooks/useDashboardData';
 import { useEventStream } from './hooks/useEventStream';
 import {
   pauseTrading,
@@ -50,12 +50,16 @@ function AppContent() {
   // Fetch real data from API
   const { data: statusData, error: statusError } = useBotStatus();
   const { data: metricsData } = useMetrics();
+  const { data: healthData } = useHealth();
 
   // Derive values from API data with fallbacks
   const mode: BotMode = statusData?.mode ?? 'stopped';
   const balance = metricsData?.availableBalance ?? 0;
   const lastHeartbeat = statusData?.lastHeartbeat ?? null;
   const isConnected = !statusError && statusData?.status !== 'unhealthy';
+  const healthStatus = healthData?.overall;
+  const dbLatencyMs = healthData?.database.latencyMs ?? null;
+  const wsConnected = healthData?.websocket.connected ?? null;
 
   const handleKillSwitch = async () => {
     if (!window.confirm('Trigger kill switch? This will stop the bot.')) {
@@ -96,6 +100,9 @@ function AppContent() {
           balance={balance}
           isConnected={isConnected}
           lastHeartbeat={lastHeartbeat}
+          healthStatus={healthStatus}
+          dbLatencyMs={dbLatencyMs}
+          wsConnected={wsConnected}
           onPause={handlePause}
           onResume={handleResume}
           onCancelAll={handleCancelAll}

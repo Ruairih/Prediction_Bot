@@ -2,7 +2,7 @@
  * E2E Tests for Performance Page
  * TDD - Tests written first
  */
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures';
 
 test.describe('Performance Page', () => {
   test.beforeEach(async ({ page }) => {
@@ -75,6 +75,10 @@ test.describe('Performance Page', () => {
     await expect(stats.getByText(/avg loss/i)).toBeVisible();
   });
 
+  test('should display execution quality panel', async ({ page }) => {
+    await expect(page.getByRole('heading', { name: /execution quality/i })).toBeVisible();
+  });
+
   // =========================================================================
   // P&L Breakdown
   // =========================================================================
@@ -123,12 +127,12 @@ test.describe('Performance Page', () => {
 
   test('should show empty state when no trades', async ({ page }) => {
     // This might show if there's no trade data
-    const emptyState = page.getByTestId('empty-state');
+    const emptyState = page.locator('[data-testid="empty-state"]');
     const table = page.getByTestId('trade-history-table');
 
     // Either table with data or empty state should be visible
     const tableVisible = await table.isVisible();
-    const emptyVisible = await emptyState.isVisible();
+    const emptyVisible = await emptyState.first().isVisible();
 
     expect(tableVisible || emptyVisible).toBeTruthy();
   });

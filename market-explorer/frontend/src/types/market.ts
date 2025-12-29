@@ -53,11 +53,14 @@ export interface PaginatedMarkets {
 export type SortField =
   | 'volume_24h'
   | 'volume_7d'
+  | 'volume_num'    // Total/lifetime volume
   | 'liquidity_score'
   | 'yes_price'
+  | 'spread'        // Best ask - best bid
   | 'end_time'
   | 'open_interest'
   | 'created_at'
+  | 'updated_at'
 
 export interface MarketFilter {
   categories?: string[]
@@ -76,3 +79,21 @@ export interface SortConfig {
 }
 
 export type CategoryCounts = Record<string, number>
+
+/** Detailed category statistics from /api/categories/detailed */
+export interface CategoryDetail {
+  category: string
+  market_count: number
+  total_volume_24h: number
+  total_liquidity: number
+  avg_price: number
+  active_markets: number
+}
+
+export interface PaginatedCategories {
+  items: CategoryDetail[]
+  total: number
+  page: number
+  page_size: number
+  total_pages: number
+}

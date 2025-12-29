@@ -142,6 +142,9 @@ class TradingEngine:
             max_recent_rejections=2000,  # Keep more samples (was 1000)
         )
 
+        # Score service (initialized in start() for singleton behavior)
+        self._score_service: Optional[Any] = None
+
         # LRU cache for market questions (condition_id -> question)
         self._question_cache: dict[str, str] = {}
         self._question_cache_max_size = 10000
@@ -220,6 +223,22 @@ class TradingEngine:
 
         logger.info(f"Starting trading engine with strategy: {self.strategy.name}")
         logger.info(f"Mode: {'DRY RUN' if self.config.dry_run else 'LIVE'}")
+
+        # Initialize ScoreService singleton and wire into EventProcessor
+        # This ensures scores are computed consistently with shared cache
+        try:
+            from .score_service import ScoreService
+
+            self._score_service = ScoreService(
+                self._db,
+                use_legacy_fallback=False,  # We have our own scoring now
+            )
+            await self._score_service.initialize()
+            self._event_processor.set_score_service(self._score_service)
+            logger.info("ScoreService initialized and wired to EventProcessor")
+        except Exception as e:
+            logger.warning(f"Failed to initialize ScoreService: {e}")
+            # Continue without score service - scoring will be attempted per-event
 
         self._is_running = True
         self._stop_event.clear()

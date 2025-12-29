@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from polymarket_bot.core.engine import TradingEngine
     from polymarket_bot.execution import ExecutionService
     from polymarket_bot.execution.position_sync import PositionSyncService
+    from polymarket_bot.storage import Database
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,11 @@ class BackgroundTaskConfig:
     full_position_sync_interval_seconds: float = 900  # 15 minutes
     full_position_sync_enabled: bool = True
 
+    # Model score refresh (updates scores as markets evolve)
+    score_refresh_interval_seconds: float = 300  # 5 minutes
+    score_refresh_enabled: bool = True
+    score_stale_threshold_seconds: float = 3600  # Re-score after 1 hour
+
 
 class BackgroundTasksManager:
     """
@@ -74,6 +80,7 @@ class BackgroundTasksManager:
         price_fetcher: Optional[Callable[[List[str]], Any]] = None,
         position_sync_service: Optional["PositionSyncService"] = None,
         wallet_address: Optional[str] = None,
+        db: Optional["Database"] = None,
     ) -> None:
         """
         Initialize the background tasks manager.
@@ -86,6 +93,7 @@ class BackgroundTasksManager:
                            Should accept list of token_ids and return dict of {token_id: Decimal}
             position_sync_service: PositionSyncService for syncing external trades
             wallet_address: Polymarket wallet address for position sync
+            db: Database for score refresh (BackgroundScorer)
         """
         self._engine = engine
         self._execution_service = execution_service
@@ -93,11 +101,13 @@ class BackgroundTasksManager:
         self._price_fetcher = price_fetcher
         self._position_sync_service = position_sync_service
         self._wallet_address = wallet_address
+        self._db = db
 
         self._running = False
         self._tasks: List[asyncio.Task] = []
         self._stop_event = asyncio.Event()
         self._last_full_sync = datetime.min.replace(tzinfo=timezone.utc)
+        self._background_scorer = None
 
     @property
     def is_running(self) -> bool:
@@ -169,6 +179,34 @@ class BackgroundTasksManager:
                     "External trades will not be detected automatically."
                 )
 
+        # Score refresh (BackgroundScorer)
+        if self._config.score_refresh_enabled and self._db:
+            try:
+                from .score_service import ScoreService, BackgroundScorer
+
+                score_service = ScoreService(self._db, use_legacy_fallback=True)
+                await score_service.initialize()
+
+                self._background_scorer = BackgroundScorer(
+                    score_service=score_service,
+                    db=self._db,
+                    interval_seconds=int(self._config.score_refresh_interval_seconds),
+                    stale_threshold_seconds=int(self._config.score_stale_threshold_seconds),
+                )
+                await self._background_scorer.start()
+                logger.info(
+                    f"Started score refresh task "
+                    f"(interval={self._config.score_refresh_interval_seconds}s, "
+                    f"stale_threshold={self._config.score_stale_threshold_seconds}s)"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to start BackgroundScorer: {e}")
+        elif self._config.score_refresh_enabled and not self._db:
+            logger.warning(
+                "Score refresh enabled but no database configured. "
+                "Market scores will not be refreshed automatically."
+            )
+
         logger.info(f"Background tasks started: {len(self._tasks)} tasks")
 
     async def stop(self) -> None:
@@ -179,6 +217,14 @@ class BackgroundTasksManager:
         logger.info("Stopping background tasks...")
         self._running = False
         self._stop_event.set()
+
+        # Stop BackgroundScorer if running
+        if self._background_scorer:
+            try:
+                await self._background_scorer.stop()
+            except Exception as e:
+                logger.warning(f"Error stopping BackgroundScorer: {e}")
+            self._background_scorer = None
 
         # Cancel all tasks
         for task in self._tasks:

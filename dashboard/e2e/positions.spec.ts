@@ -2,7 +2,7 @@
  * E2E Tests for Positions Page
  * TDD - Tests written first
  */
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures';
 
 test.describe('Positions Page', () => {
   test.beforeEach(async ({ page }) => {
@@ -14,7 +14,7 @@ test.describe('Positions Page', () => {
   // =========================================================================
 
   test('should display page title and summary', async ({ page }) => {
-    await expect(page.getByRole('heading', { name: /positions/i })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /positions & orders/i })).toBeVisible();
     await expect(page.getByTestId('positions-summary')).toBeVisible();
   });
 
@@ -119,7 +119,7 @@ test.describe('Positions Page', () => {
     }
 
     await expect(firstRow.getByRole('button', { name: /close/i })).toBeVisible();
-    await expect(firstRow.getByRole('button', { name: /adjust/i })).toBeVisible();
+    await expect(firstRow.getByRole('button', { name: /limit exit/i })).toBeVisible();
   });
 
   test.fixme('should open close position modal', async ({ page }) => {

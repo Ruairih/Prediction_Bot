@@ -43,12 +43,6 @@ const numericSort: SortingFn<Market> = (rowA, rowB, columnId) => {
   return numA - numB
 }
 
-function formatPrice(price: string | null | undefined): string {
-  if (!price) return '-'
-  const num = parseFloat(price)
-  return `${(num * 100).toFixed(0)}¢`
-}
-
 function formatVolume(volume: string | null | undefined): string {
   if (!volume) return '-'
   const num = parseFloat(volume)

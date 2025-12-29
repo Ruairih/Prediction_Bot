@@ -299,6 +299,27 @@ class Dashboard:
             created_at,
         )
 
+    async def _fetch_scores_for_conditions(
+        self, condition_ids: list[str]
+    ) -> dict[str, float]:
+        """
+        Fetch model scores from market_scores_cache for given condition IDs.
+
+        Returns dict mapping condition_id -> model_score.
+        """
+        if not self._db or not condition_ids:
+            return {}
+
+        # Use ANY() for efficient batch lookup
+        query = """
+            SELECT condition_id, model_score
+            FROM market_scores_cache
+            WHERE condition_id = ANY($1)
+              AND model_score IS NOT NULL
+        """
+        rows = await self._db.fetch(query, condition_ids)
+        return {row["condition_id"]: float(row["model_score"]) for row in rows}
+
     def create_app(self, testing: bool = False) -> "Flask":
         """
         Create the Flask application.
@@ -1057,9 +1078,27 @@ class Dashboard:
                 tracker = dashboard._engine.pipeline_tracker
                 candidates = tracker.get_candidates(sort_by=sort_by, limit=limit)
 
+                # Enrich candidates with scores from market_scores_cache
+                # This ensures we show scores even for candidates created before scoring was fixed
+                candidate_dicts = [c.to_dict() for c in candidates]
+                if dashboard._db and candidate_dicts:
+                    condition_ids = [c["condition_id"] for c in candidate_dicts if c.get("condition_id")]
+                    if condition_ids:
+                        try:
+                            scores = dashboard._run_async(
+                                dashboard._fetch_scores_for_conditions(condition_ids)
+                            )
+                            # Merge scores into candidates
+                            for c in candidate_dicts:
+                                cid = c.get("condition_id")
+                                if cid and cid in scores and c.get("model_score") is None:
+                                    c["model_score"] = scores[cid]
+                        except Exception as e:
+                            logger.debug(f"Could not enrich candidates with scores: {e}")
+
                 return jsonify({
-                    "candidates": [c.to_dict() for c in candidates],
-                    "count": len(candidates),
+                    "candidates": candidate_dicts,
+                    "count": len(candidate_dicts),
                 })
             except Exception as e:
                 logger.error(f"Failed to get pipeline candidates: {e}")
@@ -1080,9 +1119,25 @@ class Dashboard:
                 tracker = dashboard._engine.pipeline_tracker
                 near_misses = tracker.get_near_misses(Decimal(str(max_distance)))
 
+                # Enrich with scores from market_scores_cache
+                near_miss_dicts = [c.to_dict() for c in near_misses]
+                if dashboard._db and near_miss_dicts:
+                    condition_ids = [c["condition_id"] for c in near_miss_dicts if c.get("condition_id")]
+                    if condition_ids:
+                        try:
+                            scores = dashboard._run_async(
+                                dashboard._fetch_scores_for_conditions(condition_ids)
+                            )
+                            for c in near_miss_dicts:
+                                cid = c.get("condition_id")
+                                if cid and cid in scores and c.get("model_score") is None:
+                                    c["model_score"] = scores[cid]
+                        except Exception as e:
+                            logger.debug(f"Could not enrich near-misses with scores: {e}")
+
                 return jsonify({
-                    "near_misses": [c.to_dict() for c in near_misses],
-                    "count": len(near_misses),
+                    "near_misses": near_miss_dicts,
+                    "count": len(near_miss_dicts),
                 })
             except Exception as e:
                 logger.error(f"Failed to get near misses: {e}")

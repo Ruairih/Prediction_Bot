@@ -230,15 +230,6 @@ interface RawHealth {
   checked_at: string;
 }
 
-interface RawTrigger {
-  token_id: string;
-  condition_id: string;
-  threshold: number | null;
-  price: number | null;
-  trade_size: number | null;
-  model_score: number | null;
-  triggered_at: string;
-}
 
 interface RawMarket {
   market_id: string;
@@ -842,6 +833,16 @@ export async function fetchMarketOrderbook(
     throw new Error(`Market orderbook fetch failed: ${response.status}`);
   }
   const data: RawOrderbook = await response.json();
+  // Transform slippage from snake_case to camelCase
+  const transformSlippage = (
+    items: Array<{ size: number; avg_price: number | null; slippage_bps: number | null }> | undefined
+  ) =>
+    (items ?? []).map((item) => ({
+      size: item.size,
+      avgPrice: item.avg_price,
+      slippageBps: item.slippage_bps,
+    }));
+
   return {
     conditionId: data.condition_id,
     tokenId: data.token_id ?? null,
@@ -853,7 +854,10 @@ export async function fetchMarketOrderbook(
     bids: data.bids ?? [],
     asks: data.asks ?? [],
     depth: data.depth ?? { bid: { pct1: 0, pct5: 0, pct10: 0 }, ask: { pct1: 0, pct5: 0, pct10: 0 } },
-    slippage: data.slippage ?? { buy: [], sell: [] },
+    slippage: {
+      buy: transformSlippage(data.slippage?.buy),
+      sell: transformSlippage(data.slippage?.sell),
+    },
     source: data.source ?? 'unavailable',
   };
 }
@@ -1057,6 +1061,8 @@ export async function fetchPipelineRejections(
     trade_size: number | null;
     trade_age_seconds: number | null;
     rejection_values: Record<string, unknown>;
+    outcome: string | null;
+    rejection_reason: string;
   }> } = await response.json();
   return (data.rejections ?? []).map((r) => ({
     tokenId: r.token_id,
@@ -1068,6 +1074,8 @@ export async function fetchPipelineRejections(
     tradeSize: r.trade_size,
     tradeAgeSeconds: r.trade_age_seconds,
     rejectionValues: r.rejection_values,
+    outcome: r.outcome,
+    rejectionReason: r.rejection_reason ?? `Rejected at ${r.stage}`,
   }));
 }
 
@@ -1099,6 +1107,10 @@ export async function fetchPipelineCandidates(
     trade_age_seconds: number;
     highest_price_seen: number;
     times_evaluated: number;
+    outcome: string | null;
+    is_near_miss: boolean;
+    is_above_threshold: boolean;
+    status_label: string;
   }> } = await response.json();
   return (data.candidates ?? []).map((c) => ({
     tokenId: c.token_id,
@@ -1116,11 +1128,15 @@ export async function fetchPipelineCandidates(
     tradeAgeSeconds: c.trade_age_seconds,
     highestPriceSeen: c.highest_price_seen,
     timesEvaluated: c.times_evaluated,
+    outcome: c.outcome,
+    isNearMiss: c.is_near_miss ?? (c.current_price >= c.threshold),
+    isAboveThreshold: c.is_above_threshold ?? (c.current_price >= c.threshold),
+    statusLabel: c.status_label ?? (c.current_price >= c.threshold ? 'Triggered (Held)' : 'Watching'),
   }));
 }
 
 /**
- * Fetch near-miss markets
+ * Fetch near-miss markets (triggered but strategy held)
  */
 export async function fetchNearMisses(maxDistance = 0.02): Promise<CandidateMarket[]> {
   const response = await apiFetch(`${API_BASE}/api/pipeline/near-misses?max_distance=${maxDistance}`);
@@ -1143,6 +1159,10 @@ export async function fetchNearMisses(maxDistance = 0.02): Promise<CandidateMark
     trade_age_seconds: number;
     highest_price_seen: number;
     times_evaluated: number;
+    outcome: string | null;
+    is_near_miss: boolean;
+    is_above_threshold: boolean;
+    status_label: string;
   }> } = await response.json();
   return (data.near_misses ?? []).map((c) => ({
     tokenId: c.token_id,
@@ -1160,5 +1180,9 @@ export async function fetchNearMisses(maxDistance = 0.02): Promise<CandidateMark
     tradeAgeSeconds: c.trade_age_seconds,
     highestPriceSeen: c.highest_price_seen,
     timesEvaluated: c.times_evaluated,
+    outcome: c.outcome,
+    isNearMiss: c.is_near_miss ?? true,
+    isAboveThreshold: c.is_above_threshold ?? true,
+    statusLabel: c.status_label ?? 'Triggered (Held)',
   }));
 }

@@ -5,13 +5,16 @@
  */
 import clsx from 'clsx';
 import { formatDistanceToNowStrict } from 'date-fns';
-import type { BotMode } from '../../types';
+import type { BotMode, ServiceStatusValue } from '../../types';
 
 export interface StatusBarProps {
   mode: BotMode;
   balance: number;
   isConnected: boolean;
   lastHeartbeat?: string | null;
+  healthStatus?: ServiceStatusValue;
+  dbLatencyMs?: number | null;
+  wsConnected?: boolean | null;
   onPause?: () => void;
   onResume?: () => void;
   onCancelAll?: () => void;
@@ -24,6 +27,9 @@ export function StatusBar({
   balance,
   isConnected,
   lastHeartbeat,
+  healthStatus,
+  dbLatencyMs,
+  wsConnected,
   onPause,
   onResume,
   onCancelAll,
@@ -44,6 +50,13 @@ export function StatusBar({
       heartbeatLabel = `${formatDistanceToNowStrict(parsed)} ago`;
     }
   }
+
+  const healthColor = {
+    healthy: 'text-accent-green',
+    degraded: 'text-accent-yellow',
+    unhealthy: 'text-accent-red',
+    unknown: 'text-text-secondary',
+  }[healthStatus ?? 'unknown'];
 
   return (
     <header className="h-16 bg-bg-secondary/90 border-b border-border flex items-center justify-between px-6 backdrop-blur">
@@ -69,6 +82,26 @@ export function StatusBar({
           <span>{isConnected ? 'Live feed' : 'Feed down'}</span>
           <span className="text-text-secondary/70">|</span>
           <span>Heartbeat {heartbeatLabel}</span>
+          {healthStatus && (
+            <>
+              <span className="text-text-secondary/70">|</span>
+              <span className={healthColor}>System {healthStatus}</span>
+            </>
+          )}
+          {typeof dbLatencyMs === 'number' && (
+            <>
+              <span className="text-text-secondary/70">|</span>
+              <span>DB {Math.round(dbLatencyMs)}ms</span>
+            </>
+          )}
+          {typeof wsConnected === 'boolean' && (
+            <>
+              <span className="text-text-secondary/70">|</span>
+              <span className={wsConnected ? 'text-accent-green' : 'text-accent-red'}>
+                WS {wsConnected ? 'ok' : 'down'}
+              </span>
+            </>
+          )}
         </div>
       </div>
 

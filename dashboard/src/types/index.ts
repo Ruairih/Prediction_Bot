@@ -660,6 +660,8 @@ export interface RejectionEvent {
   tradeSize: number | null;
   tradeAgeSeconds: number | null;
   rejectionValues: Record<string, unknown>;
+  outcome: string | null;  // "Yes" or "No" - direction of the trade
+  rejectionReason: string;  // Human-readable explanation of why rejected
 }
 
 export interface CandidateMarket {
@@ -668,7 +670,7 @@ export interface CandidateMarket {
   question: string;
   currentPrice: number;
   threshold: number;
-  distanceToThreshold: number;
+  distanceToThreshold: number;  // Negative if above threshold
   lastUpdated: string;
   lastSignal: string;
   lastSignalReason: string;
@@ -678,6 +680,10 @@ export interface CandidateMarket {
   tradeAgeSeconds: number;
   highestPriceSeen: number;
   timesEvaluated: number;
+  outcome: string | null;  // "Yes" or "No" - which outcome token this is
+  isNearMiss: boolean;  // True if triggered (price >= threshold)
+  isAboveThreshold: boolean;  // True if price >= threshold
+  statusLabel: string;  // "Triggered (Held)", "Very Close", or "Watching"
 }
 
 export interface PipelineStats {

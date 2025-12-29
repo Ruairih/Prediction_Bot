@@ -153,7 +153,7 @@ export function Settings() {
                   JSON
                 </button>
                 <button
-                  onClick={() => downloadFile(`${item.filename}.csv`, toCsv(item.rows as Array<Record<string, unknown>>), 'text/csv')}
+                  onClick={() => downloadFile(`${item.filename}.csv`, toCsv(item.rows as unknown as Array<Record<string, unknown>>), 'text/csv')}
                   className="rounded-full border border-border px-3 py-1 text-text-secondary"
                 >
                   CSV

@@ -45,6 +45,12 @@ from .background_tasks import BackgroundTasksManager, BackgroundTaskConfig
 # Pipeline visibility
 from .pipeline_tracker import PipelineTracker, RejectionStage, RejectionEvent, CandidateMarket
 
+# Scoring service (unified model_score)
+from .score_service import ScoreService, ScoreResult, MarketData, BackgroundScorer, get_score_service
+
+# Legacy score bridge (for backward compatibility)
+from .score_bridge import ScoreBridge, get_score_bridge
+
 __all__ = [
     # Main engine
     "TradingEngine",
@@ -68,4 +74,13 @@ __all__ = [
     "RejectionStage",
     "RejectionEvent",
     "CandidateMarket",
+    # Scoring service
+    "ScoreService",
+    "ScoreResult",
+    "MarketData",
+    "BackgroundScorer",
+    "get_score_service",
+    # Legacy score bridge
+    "ScoreBridge",
+    "get_score_bridge",
 ]

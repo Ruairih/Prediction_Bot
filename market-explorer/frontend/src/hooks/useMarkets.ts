@@ -3,7 +3,7 @@
  */
 
 import { useQuery } from '@tanstack/react-query'
-import { listMarkets, getMarket, getCategories, getVolumeLeaders, searchMarkets } from '../api/client'
+import { listMarkets, getMarket, getCategories, getVolumeLeaders, searchMarkets, getCategoriesDetailed, getEventMarkets } from '../api/client'
 import type { MarketFilter, SortConfig } from '../types/market'
 
 export function useMarkets(
@@ -46,5 +46,32 @@ export function useSearchMarkets(query: string, limit = 20) {
     queryKey: ['search', query, limit],
     queryFn: ({ signal }) => searchMarkets(query, limit, signal),
     enabled: query.length >= 2,
+  })
+}
+
+export function useCategoriesDetailed(
+  page = 1,
+  pageSize = 50,
+  search?: string,
+  minMarkets = 1
+) {
+  return useQuery({
+    queryKey: ['categories-detailed', page, pageSize, search, minMarkets],
+    queryFn: ({ signal }) => getCategoriesDetailed({
+      page,
+      pageSize,
+      search,
+      minMarkets,
+      signal,
+    }),
+    staleTime: 60_000, // Categories change slowly
+  })
+}
+
+export function useEventMarkets(eventId: string | null) {
+  return useQuery({
+    queryKey: ['event-markets', eventId],
+    queryFn: ({ signal }) => getEventMarkets(eventId!, signal),
+    enabled: !!eventId,
   })
 }

@@ -4,6 +4,7 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
+import { useSearchParams } from 'react-router-dom';
 import { formatDistanceToNowStrict } from 'date-fns';
 import {
   LineChart,
@@ -25,9 +26,11 @@ import type { MarketSummary, OrderSide } from '../types';
 
 export function Markets() {
   const queryClient = useQueryClient();
+  const [searchParams] = useSearchParams();
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState('all');
   const [selectedMarket, setSelectedMarket] = useState<MarketSummary | null>(null);
+  const [selectedConditionId, setSelectedConditionId] = useState<string | null>(null);
   const [selectedTokenId, setSelectedTokenId] = useState<string | null>(null);
 
   const [orderSide, setOrderSide] = useState<OrderSide>('BUY');
@@ -38,12 +41,15 @@ export function Markets() {
   const [orderSuccess, setOrderSuccess] = useState<string | null>(null);
   const [orderSubmitting, setOrderSubmitting] = useState(false);
 
+  // Read conditionId from URL for deep linking
+  const urlConditionId = searchParams.get('conditionId');
+
   const { data: marketsData, isLoading, error } = useMarkets({ limit: 500 });
   const { data: riskData } = useRisk();
-  const selectedConditionId = selectedMarket?.conditionId ?? undefined;
-  const { data: marketDetail } = useMarketDetail(selectedConditionId);
-  const { data: marketHistory } = useMarketHistory(selectedConditionId, 100);
-  const { data: marketOrderbook } = useMarketOrderbook(selectedConditionId, selectedTokenId ?? undefined);
+  const effectiveConditionId = selectedConditionId ?? selectedMarket?.conditionId ?? undefined;
+  const { data: marketDetail } = useMarketDetail(effectiveConditionId);
+  const { data: marketHistory } = useMarketHistory(effectiveConditionId, 100);
+  const { data: marketOrderbook } = useMarketOrderbook(effectiveConditionId, selectedTokenId ?? undefined);
   const markets = marketsData ?? [];
 
   const tokens = marketDetail?.tokens ?? [];
@@ -64,7 +70,24 @@ export function Markets() {
     setOrderReason('manual_entry');
     setOrderError(null);
     setOrderSuccess(null);
-  }, [selectedConditionId]);
+  }, [effectiveConditionId]);
+
+  // Auto-select market from URL conditionId
+  useEffect(() => {
+    if (urlConditionId) {
+      setSelectedConditionId(urlConditionId);
+    }
+  }, [urlConditionId]);
+
+  useEffect(() => {
+    if (!selectedConditionId || markets.length === 0) {
+      return;
+    }
+    const market = markets.find((m) => m.conditionId === selectedConditionId) ?? null;
+    if (market?.conditionId !== selectedMarket?.conditionId) {
+      setSelectedMarket(market);
+    }
+  }, [selectedConditionId, markets, selectedMarket]);
 
   const categories = useMemo(() => {
     const set = new Set<string>();
@@ -110,13 +133,14 @@ export function Markets() {
 
   const handleSelect = (market: MarketSummary) => {
     setSelectedMarket(market);
+    setSelectedConditionId(market.conditionId ?? null);
   };
 
   const handleManualOrder = async () => {
     setOrderError(null);
     setOrderSuccess(null);
 
-    if (!selectedTokenId || !selectedConditionId) {
+    if (!selectedTokenId || !effectiveConditionId) {
       setOrderError('Select a market token before submitting.');
       return;
     }
@@ -140,7 +164,7 @@ export function Markets() {
         side: orderSide,
         price,
         size,
-        conditionId: selectedConditionId,
+        conditionId: effectiveConditionId,
         reason: orderReason || 'manual_entry',
       });
       setOrderSuccess('Manual order submitted.');
@@ -154,6 +178,7 @@ export function Markets() {
   };
 
   const detail = marketDetail?.market;
+  const hasSelection = Boolean(selectedMarket || detail);
   const position = marketDetail?.position;
   const openOrders = marketDetail?.orders ?? [];
   const lastSignal = marketDetail?.lastSignal;
@@ -271,14 +296,14 @@ export function Markets() {
             Market Detail
           </div>
           <h3 className="text-lg font-semibold text-text-primary">Selected Market</h3>
-          {selectedMarket ? (
+          {hasSelection ? (
             <div className="space-y-4 text-sm">
               <div>
                 <div className="text-text-primary font-semibold">
-                  {detail?.question ?? selectedMarket.question}
+                  {detail?.question ?? selectedMarket?.question ?? 'Unknown market'}
                 </div>
                 <div className="text-text-secondary text-xs">
-                  {detail?.category ?? selectedMarket.category ?? 'Uncategorized'}
+                  {detail?.category ?? selectedMarket?.category ?? 'Uncategorized'}
                 </div>
                 <div className="text-text-secondary text-xs mt-1">
                   {detail?.endDate ? `Resolves ${detail.endDate}` : 'Resolution TBD'}
@@ -327,8 +352,8 @@ export function Markets() {
                 <div className="flex items-center justify-between">
                   <span className="text-text-secondary">Updated</span>
                   <span className="text-text-primary">
-                    {detail?.updatedAt || selectedMarket.updatedAt
-                      ? formatDistanceToNowStrict(new Date(detail?.updatedAt ?? selectedMarket.updatedAt ?? '')) + ' ago'
+                    {detail?.updatedAt || selectedMarket?.updatedAt
+                      ? formatDistanceToNowStrict(new Date(detail?.updatedAt ?? selectedMarket?.updatedAt ?? '')) + ' ago'
                       : '-'}
                   </span>
                 </div>
@@ -680,15 +705,15 @@ export function Markets() {
 
               <div className="pt-3 border-t border-border flex flex-col gap-2">
                 <button
-                  onClick={() => selectedMarket.conditionId && blockMarket(selectedMarket.conditionId, 'operator_block', selectedTokenId ?? undefined)}
-                  disabled={!selectedMarket.conditionId}
+                  onClick={() => effectiveConditionId && blockMarket(effectiveConditionId, 'operator_block', selectedTokenId ?? undefined)}
+                  disabled={!effectiveConditionId}
                   className="w-full rounded-full border border-border px-4 py-2 text-xs font-semibold hover:border-accent-red hover:text-accent-red transition-colors disabled:opacity-50"
                 >
                   Block Market
                 </button>
                 <button
-                  onClick={() => selectedMarket.conditionId && unblockMarket(selectedMarket.conditionId)}
-                  disabled={!selectedMarket.conditionId}
+                  onClick={() => effectiveConditionId && unblockMarket(effectiveConditionId)}
+                  disabled={!effectiveConditionId}
                   className="w-full rounded-full border border-border px-4 py-2 text-xs font-semibold hover:border-accent-blue hover:text-accent-blue transition-colors disabled:opacity-50"
                 >
                   Unblock Market

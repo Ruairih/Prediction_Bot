@@ -6,6 +6,7 @@ to StrategyContext objects that strategies can evaluate.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -13,8 +14,11 @@ from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from polymarket_bot.storage import Database
+    from polymarket_bot.core.score_service import ScoreService
 
 from polymarket_bot.strategies import StrategyContext, apply_hard_filters
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -48,6 +52,7 @@ class EventProcessor:
         self,
         threshold: Decimal = Decimal("0.95"),
         max_trade_age_seconds: float = 300.0,
+        score_service: Optional["ScoreService"] = None,
     ) -> None:
         """
         Initialize the event processor.
@@ -55,9 +60,11 @@ class EventProcessor:
         Args:
             threshold: Minimum price to consider for triggers
             max_trade_age_seconds: Maximum age of trade to process (G1)
+            score_service: Optional shared ScoreService instance (recommended)
         """
         self._threshold = threshold
         self._max_trade_age_seconds = max_trade_age_seconds
+        self._score_service = score_service
 
     def set_threshold(self, threshold: Decimal) -> None:
         """Update the trigger threshold."""
@@ -66,6 +73,10 @@ class EventProcessor:
     def set_max_trade_age_seconds(self, max_trade_age_seconds: float) -> None:
         """Update the max trade age filter."""
         self._max_trade_age_seconds = max_trade_age_seconds
+
+    def set_score_service(self, score_service: "ScoreService") -> None:
+        """Set or update the score service (for late binding)."""
+        self._score_service = score_service
 
     def should_process(self, event: dict[str, Any]) -> bool:
         """
@@ -218,13 +229,64 @@ class EventProcessor:
             except (ValueError, TypeError):
                 pass
 
-        # Get model score - try event first, then SQLite bridge
+        # Get model score using ScoreService (unified scoring)
+        # Our own scoring service computes scores for ALL markets (not just legacy)
         model_score = event.get("model_score")
         if model_score is None and trigger_data.token_id:
-            # Fall back to legacy SQLite scores
-            from .score_bridge import get_score_bridge
-            bridge = get_score_bridge()
-            model_score, _ = bridge.get_score(trigger_data.token_id)
+            try:
+                from .score_service import ScoreService, MarketData, get_score_service
+
+                # Use injected ScoreService if available, otherwise get/create singleton
+                score_service = self._score_service
+                if score_service is None:
+                    score_service = await get_score_service(db)
+
+                # Ensure condition_id is available (backfill from token_meta if missing)
+                condition_id = trigger_data.condition_id
+                if not condition_id and trigger_data.token_id:
+                    cid_query = """
+                        SELECT condition_id FROM polymarket_token_meta
+                        WHERE token_id = $1 LIMIT 1
+                    """
+                    cid_row = await db.fetchrow(cid_query, trigger_data.token_id)
+                    if cid_row:
+                        condition_id = cid_row.get("condition_id", "")
+
+                # Build market data for score computation
+                # This allows NEW markets to get scores (not just cached/legacy ones)
+                market_data = MarketData(
+                    condition_id=condition_id,
+                    token_id=trigger_data.token_id,
+                    question=question,
+                    category=category,
+                    price=float(trigger_data.price),
+                    spread=None,  # Will use default if unavailable
+                    liquidity=event.get("liquidity"),
+                    volume_24h=event.get("volume_24h"),
+                    time_to_end_hours=time_to_end_hours,
+                    outcome=outcome,
+                )
+
+                result = await score_service.get_or_compute(
+                    token_id=trigger_data.token_id,
+                    condition_id=condition_id,
+                    market_data=market_data,
+                )
+                model_score = result.score
+
+                if model_score is not None:
+                    logger.debug(
+                        f"Score {model_score:.3f} ({result.source}) for "
+                        f"{trigger_data.token_id[:16]}..."
+                    )
+
+            except Exception as e:
+                # Log the actual error instead of silently swallowing
+                logger.warning(
+                    f"ScoreService failed for {trigger_data.token_id[:16]}...: {e}"
+                )
+                # Score remains None - we don't fall back to legacy SQLite anymore
+                # Our own scoring service should handle all cases
 
         return StrategyContext(
             condition_id=trigger_data.condition_id,

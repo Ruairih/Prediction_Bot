@@ -4,7 +4,7 @@
  * These tests are written FIRST (TDD) before implementation.
  * They define the expected behavior and visual appearance.
  */
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures';
 
 test.describe('Overview Page', () => {
   test.beforeEach(async ({ page }) => {
@@ -20,9 +20,9 @@ test.describe('Overview Page', () => {
     const modeIndicator = page.getByTestId('mode-indicator');
     await expect(modeIndicator).toBeVisible();
 
-    // Should show either "LIVE" or "DRY RUN"
+    // Should show a valid mode label
     const text = await modeIndicator.textContent();
-    expect(['LIVE', 'DRY RUN']).toContain(text?.trim());
+    expect(['LIVE', 'PAPER', 'PAUSED', 'OFFLINE']).toContain(text?.trim());
   });
 
   test('should display balance in top bar', async ({ page }) => {
@@ -36,8 +36,8 @@ test.describe('Overview Page', () => {
     await expect(sidebar).toBeVisible();
 
     // Check for key navigation items
-    await expect(page.getByRole('link', { name: /overview/i })).toBeVisible();
-    await expect(page.getByRole('link', { name: /positions/i })).toBeVisible();
+    await expect(page.getByRole('link', { name: /mission/i })).toBeVisible();
+    await expect(page.getByRole('link', { name: /portfolio/i })).toBeVisible();
     await expect(page.getByRole('link', { name: /strategy/i })).toBeVisible();
   });
 
@@ -96,11 +96,11 @@ test.describe('Overview Page', () => {
 
   test('should have intervention controls', async ({ page }) => {
     // Pause button
-    const pauseBtn = page.getByRole('button', { name: /pause/i });
+    const pauseBtn = page.getByTestId('bot-status').getByRole('button', { name: /pause/i });
     await expect(pauseBtn).toBeVisible();
 
     // Stop button
-    const stopBtn = page.getByRole('button', { name: /stop/i });
+    const stopBtn = page.getByTestId('bot-status').getByRole('button', { name: /stop/i });
     await expect(stopBtn).toBeVisible();
   });
 

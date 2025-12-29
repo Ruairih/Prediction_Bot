@@ -2,7 +2,7 @@
  * API Client for Market Explorer Backend
  */
 
-import type { Market, PaginatedMarkets, CategoryCounts, MarketFilter, SortConfig } from '../types/market'
+import type { Market, PaginatedMarkets, CategoryCounts, MarketFilter, SortConfig, PaginatedCategories } from '../types/market'
 
 const API_BASE = '/api'
 
@@ -90,4 +90,29 @@ export async function getVolumeLeaders(category?: string, limit = 10, signal?: A
 
 export async function getEventMarkets(eventId: string, signal?: AbortSignal): Promise<Market[]> {
   return fetchJson<Market[]>(`${API_BASE}/events/${encodeURIComponent(eventId)}/markets`, signal)
+}
+
+export interface CategoriesDetailedParams {
+  page?: number
+  pageSize?: number
+  search?: string
+  minMarkets?: number
+  includeClosed?: boolean
+  signal?: AbortSignal
+}
+
+export async function getCategoriesDetailed(params: CategoriesDetailedParams = {}): Promise<PaginatedCategories> {
+  const { page = 1, pageSize = 50, search, minMarkets = 1, includeClosed = false, signal } = params
+
+  const searchParams = new URLSearchParams()
+  searchParams.set('page', page.toString())
+  searchParams.set('page_size', pageSize.toString())
+  searchParams.set('min_markets', minMarkets.toString())
+  searchParams.set('include_closed', includeClosed.toString())
+
+  if (search) {
+    searchParams.set('search', search)
+  }
+
+  return fetchJson<PaginatedCategories>(`${API_BASE}/categories/detailed?${searchParams}`, signal)
 }
