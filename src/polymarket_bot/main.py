@@ -51,16 +51,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
+import fcntl
 import json
 import logging
 import os
 import signal
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Generator
 
 # Configure logging before imports
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -70,6 +73,87 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+# Default PID file location
+DEFAULT_PID_FILE = "/tmp/polymarket-bot.pid"
+
+
+class SingletonBotError(Exception):
+    """Raised when another bot instance is already running."""
+    pass
+
+
+@contextmanager
+def singleton_lock(pid_file: str = DEFAULT_PID_FILE) -> Generator[None, None, None]:
+    """
+    Context manager that ensures only one bot instance runs at a time.
+
+    Uses file locking (fcntl.LOCK_EX | fcntl.LOCK_NB) to prevent multiple instances.
+    The lock is automatically released when the process exits.
+
+    Args:
+        pid_file: Path to the PID file (default: /tmp/polymarket-bot.pid)
+
+    Raises:
+        SingletonBotError: If another instance is already running
+
+    Usage:
+        with singleton_lock():
+            # Only one instance can run this code at a time
+            run_bot()
+    """
+    pid_path = Path(pid_file)
+
+    # Read existing PID before opening (which would truncate)
+    existing_pid = None
+    try:
+        existing_pid = pid_path.read_text().strip()
+    except FileNotFoundError:
+        pass
+
+    # Open/create the PID file (use "a" to avoid truncating before we have the lock)
+    fp = open(pid_path, "a+")
+
+    try:
+        # Try to acquire exclusive lock (non-blocking)
+        fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (IOError, OSError):
+        # Another instance has the lock
+        fp.close()
+        if existing_pid:
+            raise SingletonBotError(
+                f"Another bot instance is already running (PID: {existing_pid}). "
+                f"Kill it with: kill {existing_pid}"
+            )
+        else:
+            raise SingletonBotError(
+                "Another bot instance is already running. "
+                f"Check for existing processes: ps aux | grep polymarket"
+            )
+
+    # We have the lock - now truncate and write our PID
+    fp.seek(0)
+    fp.truncate()
+    fp.write(str(os.getpid()))
+    fp.flush()
+
+    # Register cleanup on exit
+    def cleanup():
+        try:
+            fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
+            fp.close()
+            pid_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    atexit.register(cleanup)
+
+    try:
+        logger.info(f"Acquired singleton lock (PID: {os.getpid()}, file: {pid_file})")
+        yield
+    finally:
+        cleanup()
+        atexit.unregister(cleanup)
 
 
 @dataclass
@@ -1011,11 +1095,18 @@ def main() -> int:
     if args.log_level:
         logging.getLogger().setLevel(getattr(logging, args.log_level))
 
-    # Run async main
+    # Ensure only one bot instance runs at a time
     try:
-        return asyncio.run(main_async(args))
-    except KeyboardInterrupt:
-        return 0
+        with singleton_lock():
+            # Run async main
+            try:
+                return asyncio.run(main_async(args))
+            except KeyboardInterrupt:
+                return 0
+    except SingletonBotError as e:
+        logger.error(str(e))
+        print(f"\n❌ {e}\n", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
