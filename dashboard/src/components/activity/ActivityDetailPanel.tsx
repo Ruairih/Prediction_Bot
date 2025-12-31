@@ -3,6 +3,7 @@
  *
  * Structured view of a selected activity event.
  */
+import { useEffect, useRef, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import type { ActivityEvent } from '../../types';
 
@@ -19,17 +20,71 @@ interface DetailField {
 export function ActivityDetailPanel({ event, onClose }: ActivityDetailPanelProps) {
   const highlights = getEventHighlights(event);
   const conditionId = readString(event.details, ['conditionId', 'condition_id']);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const previouslyFocusedElement = useRef<HTMLElement | null>(null);
+
+  // Handle Escape key to close the panel
+  const handleKeyDown = useCallback((e: KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      onClose();
+    }
+  }, [onClose]);
+
+  // Focus trap: keep focus within the panel
+  const handleFocusTrap = useCallback((e: KeyboardEvent) => {
+    if (e.key !== 'Tab' || !panelRef.current) return;
+
+    const focusableElements = panelRef.current.querySelectorAll<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    );
+    const firstElement = focusableElements[0];
+    const lastElement = focusableElements[focusableElements.length - 1];
+
+    if (e.shiftKey && document.activeElement === firstElement) {
+      e.preventDefault();
+      lastElement?.focus();
+    } else if (!e.shiftKey && document.activeElement === lastElement) {
+      e.preventDefault();
+      firstElement?.focus();
+    }
+  }, []);
+
+  useEffect(() => {
+    // Store the previously focused element
+    previouslyFocusedElement.current = document.activeElement as HTMLElement;
+
+    // Focus the close button when panel opens
+    closeButtonRef.current?.focus();
+
+    // Add event listeners
+    document.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('keydown', handleFocusTrap);
+
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('keydown', handleFocusTrap);
+      // Restore focus to previously focused element
+      previouslyFocusedElement.current?.focus();
+    };
+  }, [handleKeyDown, handleFocusTrap]);
 
   return (
     <div
+      ref={panelRef}
       data-testid="activity-drawer"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="activity-panel-title"
       className="fixed inset-y-0 right-0 w-96 bg-bg-secondary border-l border-border shadow-xl z-50"
     >
       <div className="flex items-center justify-between p-4 border-b border-border">
-        <h3 className="text-lg font-semibold text-text-primary">Event Details</h3>
+        <h3 id="activity-panel-title" className="text-lg font-semibold text-text-primary">Event Details</h3>
         <button
+          ref={closeButtonRef}
           onClick={onClose}
-          className="text-text-secondary hover:text-text-primary"
+          aria-label="Close event details panel"
+          className="text-text-secondary hover:text-text-primary focus:outline-none focus:ring-2 focus:ring-accent-blue rounded p-1"
         >
           X
         </button>

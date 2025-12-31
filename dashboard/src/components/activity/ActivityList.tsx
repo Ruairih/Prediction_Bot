@@ -30,11 +30,21 @@ export interface ActivityListProps {
   onEventClick: (event: ActivityEvent) => void;
 }
 
+const severityLabels: Record<ActivityEvent['severity'], string> = {
+  info: 'Information',
+  success: 'Success',
+  warning: 'Warning',
+  error: 'Error',
+};
+
 export function ActivityList({ events, onEventClick }: ActivityListProps) {
   return (
     <div
       data-testid="activity-list"
       className="bg-bg-secondary rounded-lg border border-border overflow-hidden"
+      role="log"
+      aria-live="polite"
+      aria-label="Activity events list"
     >
       <div className="divide-y divide-border">
         {events.map((event) => (
@@ -43,6 +53,7 @@ export function ActivityList({ events, onEventClick }: ActivityListProps) {
             data-testid="activity-list-item"
             data-severity={event.severity}
             onClick={() => onEventClick(event)}
+            aria-label={`${severityLabels[event.severity]}: ${event.type.replace(/_/g, ' ')} - ${event.summary}`}
             className={clsx(
               'w-full flex items-start gap-4 p-4 text-left border-l-4 transition-colors',
               'hover:bg-bg-tertiary/50 focus:outline-none focus:ring-2 focus:ring-accent-blue focus:ring-inset',
@@ -65,6 +76,8 @@ export function ActivityList({ events, onEventClick }: ActivityListProps) {
               <div className="text-sm text-text-primary mt-1 truncate">
                 {event.summary}
               </div>
+              {/* Screen reader only severity indicator */}
+              <span className="sr-only">Severity: {severityLabels[event.severity]}</span>
             </div>
           </button>
         ))}

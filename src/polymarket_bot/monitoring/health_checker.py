@@ -147,11 +147,13 @@ class HealthChecker:
 
         # Check connection status
         is_connected = getattr(self._websocket_client, "is_connected", False)
+        ws_state = getattr(self._websocket_client, "state", "unknown")
+        logger.info(f"WebSocket health check: is_connected={is_connected}, state={ws_state}, client={type(self._websocket_client)}")
         if not is_connected:
             return ComponentHealth(
                 component="websocket",
                 status=HealthStatus.UNHEALTHY,
-                message="WebSocket is disconnected",
+                message=f"WebSocket is disconnected (state={ws_state})",
             )
 
         # Check message staleness

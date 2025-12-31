@@ -35,11 +35,16 @@ export function PositionsTable({
 
   return (
     <div data-testid="positions-table" className="bg-bg-secondary rounded-2xl border border-border overflow-hidden shadow-sm">
-      <div className="overflow-x-auto">
-        <table className="w-full">
+      {/* Horizontal scroll wrapper for mobile - ensures table is scrollable */}
+      <div className="overflow-x-auto -webkit-overflow-scrolling-touch">
+        <table className="w-full min-w-[640px]" aria-label="Open positions">
+          <caption className="sr-only">
+            Open trading positions showing market, size, entry and current prices, profit/loss, and available actions
+          </caption>
           <thead className="bg-bg-tertiary">
             <tr>
               <th
+                scope="col"
                 className="px-4 py-3 text-left text-sm font-medium text-text-secondary cursor-pointer hover:text-text-primary"
                 onClick={() => onSort('entryTime')}
                 aria-sort={getAriaSort('entryTime')}
@@ -47,26 +52,31 @@ export function PositionsTable({
                 Market{getSortIndicator('entryTime')}
               </th>
               <th
+                scope="col"
                 className="px-4 py-3 text-right text-sm font-medium text-text-secondary cursor-pointer hover:text-text-primary"
                 onClick={() => onSort('size')}
                 aria-sort={getAriaSort('size')}
               >
                 Size{getSortIndicator('size')}
               </th>
-              <th className="px-4 py-3 text-right text-sm font-medium text-text-secondary">
+              <th scope="col" className="px-4 py-3 text-right text-sm font-medium text-text-secondary">
                 Entry
               </th>
-              <th className="px-4 py-3 text-right text-sm font-medium text-text-secondary">
+              <th scope="col" className="px-4 py-3 text-right text-sm font-medium text-text-secondary">
                 Current
               </th>
               <th
+                scope="col"
                 className="px-4 py-3 text-right text-sm font-medium text-text-secondary cursor-pointer hover:text-text-primary"
                 onClick={() => onSort('unrealizedPnl')}
                 aria-sort={getAriaSort('unrealizedPnl')}
               >
                 P&L{getSortIndicator('unrealizedPnl')}
               </th>
-              <th className="px-4 py-3 text-right text-sm font-medium text-text-secondary">
+              <th scope="col" className="px-4 py-3 text-center text-sm font-medium text-text-secondary">
+                Status
+              </th>
+              <th scope="col" className="px-4 py-3 text-right text-sm font-medium text-text-secondary">
                 Actions
               </th>
             </tr>
@@ -76,7 +86,10 @@ export function PositionsTable({
               <tr
                 key={position.positionId}
                 data-testid="position-row"
-                className="hover:bg-bg-tertiary/50 transition-colors"
+                className={clsx(
+                  "hover:bg-bg-tertiary/50 transition-colors",
+                  position.status === 'closed' && "opacity-60"
+                )}
               >
                 <td className="px-4 py-3">
                   <div className="max-w-xs">
@@ -110,23 +123,36 @@ export function PositionsTable({
                     </span>
                   </div>
                 </td>
+                <td className="px-4 py-3 text-center">
+                  <span className={clsx(
+                    'inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium',
+                    position.status === 'open' && 'bg-accent-green/20 text-accent-green',
+                    position.status === 'closed' && 'bg-text-secondary/20 text-text-secondary'
+                  )}>
+                    {position.status === 'open' ? 'Open' : 'Closed'}
+                  </span>
+                </td>
                 <td className="px-4 py-3 text-right">
-                  <div className="flex items-center justify-end gap-2">
-                    <button
-                      onClick={() => onAdjust(position)}
-                      aria-label={`Limit exit for ${position.question}`}
-                      className="px-2 py-1 text-xs bg-accent-blue/20 text-accent-blue rounded hover:bg-accent-blue/30 transition-colors"
-                    >
-                      Exit Limit
-                    </button>
-                    <button
-                      onClick={() => onClose(position)}
-                      aria-label={`Close position for ${position.question}`}
-                      className="px-2 py-1 text-xs bg-accent-red/20 text-accent-red rounded hover:bg-accent-red/30 transition-colors"
-                    >
-                      Close
-                    </button>
-                  </div>
+                  {position.status === 'open' ? (
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        onClick={() => onAdjust(position)}
+                        aria-label={`Limit exit for ${position.question}`}
+                        className="px-2 py-1 text-xs bg-accent-blue/20 text-accent-blue rounded hover:bg-accent-blue/30 transition-colors"
+                      >
+                        Exit Limit
+                      </button>
+                      <button
+                        onClick={() => onClose(position)}
+                        aria-label={`Close position for ${position.question}`}
+                        className="px-2 py-1 text-xs bg-accent-red/20 text-accent-red rounded hover:bg-accent-red/30 transition-colors"
+                      >
+                        Close
+                      </button>
+                    </div>
+                  ) : (
+                    <span className="text-xs text-text-secondary">—</span>
+                  )}
                 </td>
               </tr>
             ))}

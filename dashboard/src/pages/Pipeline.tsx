@@ -240,13 +240,15 @@ export function Pipeline() {
                 <button
                   key={item.stage}
                   onClick={() => setSelectedStage(selectedStage === item.stage ? null : item.stage)}
+                  aria-pressed={selectedStage === item.stage}
+                  aria-label={`${item.label}: ${item.count} rejections (${item.percentage.toFixed(1)}%)`}
                   className={`w-full flex items-center gap-3 p-3 rounded-lg transition-colors ${
                     selectedStage === item.stage
                       ? 'bg-bg-tertiary ring-1 ring-accent-primary'
                       : 'hover:bg-bg-tertiary'
                   }`}
                 >
-                  <div className={`w-3 h-3 rounded-full ${stageColors[item.stage]}`} />
+                  <div className={`w-3 h-3 rounded-full ${stageColors[item.stage]}`} aria-hidden="true" />
                   <span className="flex-1 text-left text-sm text-text-primary">{item.label}</span>
                   <span className="text-text-secondary text-sm w-24 text-right">
                     {item.count.toLocaleString()}
@@ -272,7 +274,7 @@ export function Pipeline() {
               <div className="mt-3 space-y-2">
                 {group.stages.map((stage) => (
                   <div key={stage} className="flex items-start gap-2">
-                    <span className={`mt-1 h-2 w-2 rounded-full ${stageColors[stage]}`} />
+                    <span className={`mt-1 h-2 w-2 rounded-full ${stageColors[stage]}`} aria-hidden="true" />
                     <div>
                       <div className="text-sm text-text-primary">{stageInfo[stage].label}</div>
                       <div className="text-xs text-text-secondary">{stageInfo[stage].description}</div>
@@ -326,16 +328,20 @@ export function Pipeline() {
         </div>
 
         {rejections && rejections.length > 0 ? (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+          /* Horizontal scroll wrapper for mobile */
+          <div className="overflow-x-auto -webkit-overflow-scrolling-touch">
+            <table className="w-full min-w-[700px] text-sm" aria-label="Recent rejections">
+              <caption className="sr-only">
+                Recent pipeline rejections showing time, stage, market, price, key data, and rejection reason
+              </caption>
               <thead>
                 <tr className="text-left text-text-secondary border-b border-border">
-                  <th className="pb-2 font-medium">Time</th>
-                  <th className="pb-2 font-medium">Stage</th>
-                  <th className="pb-2 font-medium">Market</th>
-                  <th className="pb-2 font-medium text-right">Price</th>
-                  <th className="pb-2 font-medium">Key Data</th>
-                  <th className="pb-2 font-medium">Why Rejected</th>
+                  <th scope="col" className="pb-2 font-medium">Time</th>
+                  <th scope="col" className="pb-2 font-medium">Stage</th>
+                  <th scope="col" className="pb-2 font-medium">Market</th>
+                  <th scope="col" className="pb-2 font-medium text-right">Price</th>
+                  <th scope="col" className="pb-2 font-medium">Key Data</th>
+                  <th scope="col" className="pb-2 font-medium">Why Rejected</th>
                 </tr>
               </thead>
               <tbody>
@@ -538,7 +544,7 @@ function StageBadge({ stage }: { stage: RejectionStage }) {
       className="inline-flex items-center gap-1.5 rounded-full border border-border bg-bg-tertiary px-2 py-0.5 text-xs text-text-primary"
       title={stageInfo[stage].description}
     >
-      <span className={`h-2 w-2 rounded-full ${stageColors[stage]}`} />
+      <span className={`h-2 w-2 rounded-full ${stageColors[stage]}`} aria-hidden="true" />
       {stageInfo[stage].label}
     </span>
   );

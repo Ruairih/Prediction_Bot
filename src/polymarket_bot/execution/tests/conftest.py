@@ -259,13 +259,14 @@ def position_tracker(mock_db):
 
 
 @pytest.fixture
-def exit_manager(mock_db, mock_clob_client, position_tracker, balance_manager):
+def exit_manager(mock_db, mock_clob_client, position_tracker, balance_manager, order_manager):
     """ExitManager with mocked CLOB client."""
     manager = ExitManager(
         db=mock_db,
         clob_client=mock_clob_client,
         position_tracker=position_tracker,
         balance_manager=balance_manager,
+        order_manager=order_manager,
         profit_target=Decimal("0.99"),
         stop_loss=Decimal("0.90"),
         min_hold_days=7,

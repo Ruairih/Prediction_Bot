@@ -45,7 +45,11 @@
       "Bash(ping:*)",
       "Bash(ip route:*)",
       "Bash(chmod:*)",
-      "Bash(tailscale status:*)"
+      "Bash(tailscale status:*)",
+      "Bash(PYTHONPATH=src pytest:*)",
+      "Bash(npx playwright test:*)",
+      "Bash(python:*)",
+      "Bash(git remote set-url:*)"
     ]
   }
 }

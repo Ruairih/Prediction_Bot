@@ -24,6 +24,7 @@ from .position_tracker import Position, PositionTracker
 
 if TYPE_CHECKING:
     from polymarket_bot.storage import Database
+    from .order_manager import OrderManager
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,7 @@ class ExitManager:
         clob_client: Optional[Any] = None,
         position_tracker: Optional[PositionTracker] = None,
         balance_manager: Optional[BalanceManager] = None,
+        order_manager: Optional["OrderManager"] = None,
         profit_target: Optional[Decimal] = None,
         stop_loss: Optional[Decimal] = None,
         min_hold_days: Optional[int] = None,
@@ -80,6 +82,7 @@ class ExitManager:
             clob_client: Polymarket CLOB client for order submission
             position_tracker: Position tracker for closing positions
             balance_manager: Balance manager for G4 protection (balance refresh)
+            order_manager: Order manager for persisting SELL orders to database
             profit_target: Override for profit target price
             stop_loss: Override for stop loss price
             min_hold_days: Override for minimum hold days
@@ -89,6 +92,7 @@ class ExitManager:
         self._clob_client = clob_client
         self._position_tracker = position_tracker or PositionTracker(db)
         self._balance_manager = balance_manager or BalanceManager(db, clob_client)
+        self._order_manager = order_manager  # May be None for backwards compat
 
         # Configuration
         self._config = config or ExitConfig()
@@ -275,17 +279,55 @@ class ExitManager:
             # This ensures we don't place limit orders above the best bid
             actual_exit_price = safe_price if safe_price is not None else current_price
 
-            # Submit sell order if client available
-            if self._clob_client:
-                # py-clob-client requires OrderArgs object
+            # Submit sell order - prefer OrderManager for DB persistence
+            # FIX: Use OrderManager to persist SELL orders to database
+            # This fixes the bug where exit orders were not tracked
+            if self._order_manager:
+                # Use OrderManager for proper persistence
+                try:
+                    order_id = await self._order_manager.submit_order(
+                        token_id=position.token_id,
+                        condition_id=position.condition_id,
+                        side="SELL",
+                        price=actual_exit_price,
+                        size=position.size,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Exit order for {position.position_id} failed: {e}. "
+                        f"Position NOT closed to avoid desync."
+                    )
+                    await self._position_tracker.clear_exit_pending(
+                        position.position_id,
+                        exit_status="failed",
+                    )
+                    return False, None
+
+                if not order_id:
+                    logger.warning(
+                        f"Exit order for {position.position_id} returned no order_id. "
+                        f"Position NOT closed to avoid desync."
+                    )
+                    await self._position_tracker.clear_exit_pending(
+                        position.position_id,
+                        exit_status="failed",
+                    )
+                    return False, None
+
+            elif self._clob_client:
+                # Fallback: Direct CLOB call (no DB persistence - legacy mode)
+                # This path is only used when order_manager is not provided
                 from py_clob_client.clob_types import OrderArgs
 
-                # G13: Use verified safe price (best bid) for the limit order
-                # This ensures we sell at the actual market price, not a stale trigger price
+                logger.warning(
+                    f"Using direct CLOB call for exit (no DB persistence). "
+                    f"Consider providing order_manager for proper tracking."
+                )
+
                 order_args = OrderArgs(
                     token_id=position.token_id,
                     side="SELL",
-                    price=float(actual_exit_price),  # G13: Use verified price
+                    price=float(actual_exit_price),
                     size=float(position.size),
                 )
 
@@ -301,14 +343,14 @@ class ExitManager:
                         f"Exit order for {position.position_id} returned no order_id. "
                         f"Position NOT closed to avoid desync."
                     )
-                    # Clear the claimed state since order failed
                     await self._position_tracker.clear_exit_pending(
                         position.position_id,
                         exit_status="failed",
                     )
                     return False, None
 
-                # Update pending state with actual order_id
+            # Update pending state with actual order_id
+            if order_id:
                 await self._position_tracker.mark_exit_pending(
                     position.position_id,
                     order_id,

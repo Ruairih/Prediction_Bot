@@ -34,6 +34,13 @@ from .models import PriceUpdate
 from .processor import EventProcessor, ProcessorConfig
 from .websocket import PolymarketWebSocket, WebSocketState
 
+# Import for token metadata persistence
+try:
+    from polymarket_bot.storage import TokenMetaRepository, PolymarketTokenMeta
+    HAS_TOKEN_META = True
+except ImportError:
+    HAS_TOKEN_META = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -597,6 +604,9 @@ class IngestionService:
                     for token in market.tokens:
                         self._token_to_market[token.token_id] = market.condition_id
 
+                # Persist token metadata to database for dashboard access
+                await self._save_token_metadata(markets)
+
                 total_fetched += len(markets)
                 offset += len(markets)
 
@@ -653,13 +663,19 @@ class IngestionService:
                 if not markets:
                     break
 
+                new_markets = []
                 for market in markets:
                     if market.condition_id not in self._markets_cache:
                         self._markets_cache[market.condition_id] = market
+                        new_markets.append(market)
                         for token in market.tokens:
                             if token.token_id not in self._token_to_market:
                                 self._token_to_market[token.token_id] = market.condition_id
                                 new_tokens.append(token.token_id)
+
+                # Persist token metadata for new markets
+                if new_markets:
+                    await self._save_token_metadata(new_markets)
 
                 total_fetched += len(markets)
                 offset += len(markets)
@@ -705,6 +721,61 @@ class IngestionService:
             raise
         except Exception as e:
             logger.error(f"Background market fetch failed: {e}")
+
+    async def _save_token_metadata(self, markets: list) -> None:
+        """
+        Persist token metadata to database for dashboard access.
+
+        This ensures the polymarket_token_meta table is populated,
+        which is required for the dashboard's manual order feature
+        to display tokens for a selected market.
+        """
+        if not HAS_TOKEN_META:
+            logger.debug("TokenMetaRepository not available, skipping token persistence")
+            return
+
+        if not self._db:
+            logger.debug("No database connection, skipping token persistence")
+            return
+
+        try:
+            from polymarket_bot.ingestion.models import OutcomeType
+
+            repo = TokenMetaRepository(self._db)
+            tokens_saved = 0
+
+            for market in markets:
+                for idx, token in enumerate(market.tokens):
+                    # Map OutcomeType to outcome_index and string
+                    if token.outcome == OutcomeType.YES:
+                        outcome_index = 0
+                        outcome_str = "Yes"
+                    elif token.outcome == OutcomeType.NO:
+                        outcome_index = 1
+                        outcome_str = "No"
+                    else:
+                        outcome_index = idx
+                        outcome_str = str(token.outcome.value) if hasattr(token.outcome, 'value') else str(token.outcome)
+
+                    meta = PolymarketTokenMeta(
+                        token_id=token.token_id,
+                        condition_id=market.condition_id,
+                        market_id=market.condition_id,
+                        outcome_index=outcome_index,
+                        outcome=outcome_str,
+                        question=market.question,
+                        fetched_at=datetime.now(timezone.utc).isoformat(),
+                    )
+
+                    await repo.upsert(meta)
+                    tokens_saved += 1
+
+            if tokens_saved > 0:
+                logger.debug(f"Persisted {tokens_saved} token metadata records")
+
+        except Exception as e:
+            # Don't fail the service if token persistence fails
+            logger.warning(f"Failed to persist token metadata: {e}")
 
     async def _start_dashboard(self) -> None:
         """Start the dashboard server in the background."""

@@ -30,6 +30,39 @@ import type {
 const API_BASE = '';  // Vite proxy handles /api -> localhost:9050
 const API_KEY_STORAGE = 'dashboard_api_key';
 
+/**
+ * Convert a camelCase string to snake_case
+ * @example camelToSnakeCase('maxPositionSize') => 'max_position_size'
+ */
+function camelToSnakeCase(str: string): string {
+  return str.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+}
+
+/**
+ * Recursively transform all keys in an object from camelCase to snake_case
+ * Handles nested objects and arrays. Does not transform values, only keys.
+ */
+function transformKeysToSnakeCase<T>(obj: T): unknown {
+  if (obj === null || obj === undefined) {
+    return obj;
+  }
+
+  if (Array.isArray(obj)) {
+    return obj.map((item) => transformKeysToSnakeCase(item));
+  }
+
+  if (typeof obj === 'object') {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+      const snakeKey = camelToSnakeCase(key);
+      result[snakeKey] = transformKeysToSnakeCase(value);
+    }
+    return result;
+  }
+
+  return obj;
+}
+
 function getApiKey(): string | null {
   if (typeof window === 'undefined') {
     return null;
@@ -207,6 +240,7 @@ interface RawOrder {
   order_id: string;
   token_id: string;
   condition_id: string;
+  question?: string | null;
   side?: 'BUY' | 'SELL' | null;
   order_price?: number | null;
   order_size?: number | null;
@@ -416,10 +450,15 @@ export async function fetchRisk(): Promise<RiskStatus> {
  * Update risk limits
  */
 export async function updateRiskLimits(payload: Partial<RiskStatus['limits']>): Promise<RiskStatus> {
+  // Transform camelCase keys to snake_case for backend compatibility
+  const snakeCasePayload = transformKeysToSnakeCase(payload);
+  if (import.meta.env.DEV) {
+    console.log('[API] updateRiskLimits payload transformed:', snakeCasePayload);
+  }
   const response = await apiFetch(`${API_BASE}/api/risk`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(snakeCasePayload),
   });
   if (!response.ok) {
     throw new Error(`Risk update failed: ${response.status}`);
@@ -494,7 +533,7 @@ export async function fetchOrders(limit = 200): Promise<Order[]> {
     orderId: order.order_id,
     tokenId: order.token_id,
     conditionId: order.condition_id,
-    question: `Order ${order.token_id.slice(0, 6)}...`,
+    question: order.question ?? `Order ${order.token_id.slice(0, 8)}...`,
     side: (order.side ?? 'BUY') as Order['side'],
     price: order.order_price ?? 0,
     size: order.order_size ?? 0,
@@ -870,17 +909,15 @@ export async function submitManualOrder(payload: {
   conditionId?: string;
   reason?: string;
 }) {
+  // Transform camelCase keys to snake_case for backend compatibility
+  const snakeCasePayload = transformKeysToSnakeCase(payload);
+  if (import.meta.env.DEV) {
+    console.log('[API] submitManualOrder payload transformed:', snakeCasePayload);
+  }
   const response = await apiFetch(`${API_BASE}/api/orders/manual`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      token_id: payload.tokenId,
-      side: payload.side,
-      price: payload.price,
-      size: payload.size,
-      condition_id: payload.conditionId,
-      reason: payload.reason,
-    }),
+    body: JSON.stringify(snakeCasePayload),
   });
   if (!response.ok) {
     throw new Error(`Manual order failed: ${response.status}`);
@@ -944,10 +981,16 @@ export async function flattenPositions(reason?: string) {
 }
 
 export async function closePosition(positionId: string, price?: number, reason?: string, tokenId?: string) {
+  // Transform camelCase keys to snake_case for backend compatibility
+  const payload = { price, reason, tokenId };
+  const snakeCasePayload = transformKeysToSnakeCase(payload);
+  if (import.meta.env.DEV) {
+    console.log('[API] closePosition payload transformed:', snakeCasePayload);
+  }
   const response = await apiFetch(`${API_BASE}/api/positions/${positionId}/close`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ price, reason, token_id: tokenId }),
+    body: JSON.stringify(snakeCasePayload),
   });
   if (!response.ok) {
     throw new Error(`Close position failed: ${response.status}`);
@@ -956,10 +999,16 @@ export async function closePosition(positionId: string, price?: number, reason?:
 }
 
 export async function blockMarket(conditionId: string, reason?: string, tokenId?: string) {
+  // Transform camelCase keys to snake_case for backend compatibility
+  const payload = { reason, tokenId };
+  const snakeCasePayload = transformKeysToSnakeCase(payload);
+  if (import.meta.env.DEV) {
+    console.log('[API] blockMarket payload transformed:', snakeCasePayload);
+  }
   const response = await apiFetch(`${API_BASE}/api/market/${conditionId}/block`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ reason, token_id: tokenId }),
+    body: JSON.stringify(snakeCasePayload),
   });
   if (!response.ok) {
     throw new Error(`Block market failed: ${response.status}`);

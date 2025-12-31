@@ -20,29 +20,33 @@ export function TradeHistoryTable({ trades, onTradeClick }: TradeHistoryTablePro
       <h3 className="text-lg font-semibold p-4 border-b border-border text-text-primary">
         Trade History
       </h3>
-      <div className="overflow-x-auto">
-        <table className="w-full">
+      {/* Horizontal scroll wrapper for mobile */}
+      <div className="overflow-x-auto -webkit-overflow-scrolling-touch">
+        <table className="w-full min-w-[700px]" aria-label="Trade history">
+          <caption className="sr-only">
+            Historical trades showing market, side, size, entry and exit prices, profit/loss, and date
+          </caption>
           <thead className="bg-bg-tertiary">
             <tr>
-              <th className="px-4 py-3 text-left text-sm font-medium text-text-secondary">
+              <th scope="col" className="px-4 py-3 text-left text-sm font-medium text-text-secondary">
                 Market
               </th>
-              <th className="px-4 py-3 text-center text-sm font-medium text-text-secondary">
+              <th scope="col" className="px-4 py-3 text-center text-sm font-medium text-text-secondary">
                 Side
               </th>
-              <th className="px-4 py-3 text-right text-sm font-medium text-text-secondary">
+              <th scope="col" className="px-4 py-3 text-right text-sm font-medium text-text-secondary">
                 Size
               </th>
-              <th className="px-4 py-3 text-right text-sm font-medium text-text-secondary">
+              <th scope="col" className="px-4 py-3 text-right text-sm font-medium text-text-secondary">
                 Entry
               </th>
-              <th className="px-4 py-3 text-right text-sm font-medium text-text-secondary">
+              <th scope="col" className="px-4 py-3 text-right text-sm font-medium text-text-secondary">
                 Exit
               </th>
-              <th className="px-4 py-3 text-right text-sm font-medium text-text-secondary">
+              <th scope="col" className="px-4 py-3 text-right text-sm font-medium text-text-secondary">
                 P&L
               </th>
-              <th className="px-4 py-3 text-right text-sm font-medium text-text-secondary">
+              <th scope="col" className="px-4 py-3 text-right text-sm font-medium text-text-secondary">
                 Date
               </th>
             </tr>

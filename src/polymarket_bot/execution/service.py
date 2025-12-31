@@ -169,6 +169,7 @@ class ExecutionService:
             clob_client=clob_client,
             position_tracker=self._position_tracker,
             balance_manager=self._balance_manager,
+            order_manager=self._order_manager,
             config=self._config.exit_config,
         )
         # G12 FIX: Position sync service for size updates before exits

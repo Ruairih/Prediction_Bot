@@ -10,6 +10,7 @@ import { PositionsFilters } from '../components/positions/PositionsFilters';
 import { PositionsTable } from '../components/positions/PositionsTable';
 import { Pagination } from '../components/common/Pagination';
 import { EmptyState } from '../components/common/EmptyState';
+import { SkeletonPositions } from '../components/common/Skeleton';
 import { usePositions, useMetrics, useOrders } from '../hooks/useDashboardData';
 import { cancelAllOrders, flattenPositions, closePosition } from '../api/dashboard';
 import type { Position, PositionSummary, PositionFilterState, Order } from '../types';
@@ -33,7 +34,7 @@ export function Positions() {
   // Fetch real data from API
   const { data: positionsData, isLoading, error } = usePositions();
   const { data: metricsData } = useMetrics();
-  const { data: ordersData, isLoading: ordersLoading } = useOrders(200);
+  const { data: ordersData } = useOrders(200);
 
   // Use API data with fallbacks
   const positions: Position[] = positionsData ?? [];
@@ -183,6 +184,11 @@ export function Positions() {
     return sorted.slice(0, 20);
   }, [orders]);
 
+  // Show skeleton loading state on initial load
+  if (isLoading && !positionsData) {
+    return <SkeletonPositions />;
+  }
+
   return (
     <div className="px-6 py-6 space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
@@ -213,9 +219,6 @@ export function Positions() {
           >
             Flatten
           </button>
-          {(isLoading || ordersLoading) && (
-            <span className="text-text-secondary text-xs">Loading...</span>
-          )}
         </div>
       </div>
 
@@ -263,8 +266,8 @@ export function Positions() {
                 No orders recorded yet.
               </div>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
+              <div className="overflow-x-auto -webkit-overflow-scrolling-touch">
+                <table className="w-full min-w-[640px] text-sm">
                   <thead className="bg-bg-tertiary text-text-secondary text-xs uppercase tracking-widest">
                     <tr>
                       <th className="px-4 py-3 text-left">Order</th>
@@ -325,11 +328,11 @@ export function Positions() {
           <h3 className="text-sm font-semibold text-text-primary">Order Blotter</h3>
           <span className="text-xs text-text-secondary">{orders.length} orders</span>
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
+        <div className="overflow-x-auto -webkit-overflow-scrolling-touch">
+          <table className="w-full min-w-[640px] text-sm">
             <thead className="bg-bg-tertiary text-text-secondary text-xs uppercase tracking-widest">
               <tr>
-                <th className="px-4 py-3 text-left">Token</th>
+                <th className="px-4 py-3 text-left">Market</th>
                 <th className="px-4 py-3 text-right">Side</th>
                 <th className="px-4 py-3 text-right">Price</th>
                 <th className="px-4 py-3 text-right">Size</th>
@@ -341,7 +344,7 @@ export function Positions() {
             <tbody className="divide-y divide-border">
               {orders.slice(0, 20).map((order) => (
                 <tr key={order.orderId} className="hover:bg-bg-tertiary/60">
-                  <td className="px-4 py-3 text-text-primary">{order.tokenId.slice(0, 8)}...</td>
+                  <td className="px-4 py-3 text-text-primary max-w-[300px] truncate" title={order.question}>{order.question}</td>
                   <td className="px-4 py-3 text-right text-text-secondary">{order.side}</td>
                   <td className="px-4 py-3 text-right text-text-primary">{order.price.toFixed(3)}</td>
                   <td className="px-4 py-3 text-right text-text-primary">{order.size.toFixed(2)}</td>

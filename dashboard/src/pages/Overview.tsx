@@ -9,6 +9,7 @@ import { KpiTile } from '../components/overview/KpiTile';
 import { BotStatus } from '../components/overview/BotStatus';
 import { ActivityStream } from '../components/overview/ActivityStream';
 import { EquityCurveChart } from '../components/performance/EquityCurveChart';
+import { SkeletonOverview } from '../components/common/Skeleton';
 import { useBotStatus, useMetrics, useActivity, usePositions, usePerformance } from '../hooks/useDashboardData';
 import { pauseTrading, resumeTrading, killTrading } from '../api/dashboard';
 import type { BotStatus as BotStatusType, DashboardMetrics, ActivityEvent, Position } from '../types';
@@ -84,6 +85,11 @@ export function Overview() {
   const isConnected = !statusError && !metricsError;
   const isLoading = statusLoading || metricsLoading;
 
+  // Show skeleton loading state on initial load
+  if (isLoading && !statusData && !metricsData) {
+    return <SkeletonOverview />;
+  }
+
   return (
     <div className="px-6 py-6 space-y-6">
       {/* Page Title */}
@@ -105,7 +111,10 @@ export function Overview() {
           {isLoading && (
             <span className="text-text-secondary text-xs">Syncing data...</span>
           )}
-          <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-accent-green' : 'bg-accent-red'}`} />
+          <div
+            className={`w-2 h-2 rounded-full ${isConnected ? 'bg-accent-green' : 'bg-accent-red'}`}
+            aria-hidden="true"
+          />
           <span className="text-text-secondary">
             {isConnected ? 'Connected' : 'Disconnected'}
           </span>

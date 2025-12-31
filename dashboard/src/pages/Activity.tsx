@@ -7,6 +7,7 @@ import { useSearchParams } from 'react-router-dom';
 import { ActivityFilters, ActivityList, ActivityStats, ActivityDetailPanel } from '../components/activity';
 import { Pagination } from '../components/common/Pagination';
 import { EmptyState } from '../components/common/EmptyState';
+import { SkeletonActivity } from '../components/common/Skeleton';
 import { useActivity } from '../hooks/useDashboardData';
 import type { ActivityEvent, ActivityFilterState, ActivityStats as ActivityStatsType } from '../types';
 
@@ -112,6 +113,11 @@ export function Activity() {
     page * PAGE_SIZE
   );
 
+  // Show skeleton loading state on initial load
+  if (isLoading && !eventsData) {
+    return <SkeletonActivity />;
+  }
+
   return (
     <div className="p-6 space-y-6">
       <div className="flex justify-between items-start">
@@ -119,11 +125,6 @@ export function Activity() {
           <h1 className="text-2xl font-bold text-text-primary">Activity</h1>
           <p className="text-text-secondary">Complete activity log and event history</p>
         </div>
-
-        {/* Loading indicator */}
-        {isLoading && (
-          <span className="text-text-secondary text-sm">Loading...</span>
-        )}
       </div>
 
       {/* Error Banner */}

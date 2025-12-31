@@ -1461,3 +1461,315 @@ class TestG13SlippageProtection:
 
         assert is_safe is True
         assert safe_price == Decimal("0.97")
+
+
+# =============================================================================
+# Regression Tests: SELL Order Persistence Bug
+# =============================================================================
+
+
+class TestSellOrderPersistence:
+    """
+    Regression tests for the SELL order persistence bug.
+
+    BUG: ExitManager.execute_exit() was calling CLOB directly, bypassing
+    OrderManager.submit_order(). This meant SELL orders were NOT persisted
+    to the database, causing:
+    - No order records for exits
+    - No exit_events created (equity curve didn't update)
+    - No audit trail for exit attempts
+
+    FIX: execute_exit() now uses order_manager.submit_order() when available,
+    ensuring SELL orders are persisted like BUY orders.
+    """
+
+    @pytest.mark.asyncio
+    async def test_exit_uses_order_manager_when_provided(
+        self, mock_db, mock_clob_client, position_tracker, balance_manager, order_manager
+    ):
+        """
+        CRITICAL: When order_manager is provided, execute_exit() should
+        use order_manager.submit_order(), NOT direct CLOB call.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+            balance_manager=balance_manager,
+            order_manager=order_manager,
+            min_hold_days=7,
+        )
+
+        position = Position(
+            position_id="pos_sell_test",
+            token_id="tok_sell",
+            condition_id="0xsell",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+        position_tracker.positions[position.position_id] = position
+
+        # Spy on order_manager.submit_order
+        original_submit = order_manager.submit_order
+        order_manager.submit_order = AsyncMock(return_value="sell_order_123")
+
+        await manager.execute_exit(
+            position,
+            current_price=Decimal("0.98"),
+            reason="profit_target",
+        )
+
+        # CRITICAL: order_manager.submit_order should be called, NOT direct CLOB
+        order_manager.submit_order.assert_called_once()
+        call_args = order_manager.submit_order.call_args
+        assert call_args.kwargs.get("side") == "SELL" or call_args[1].get("side") == "SELL"
+
+        # Restore
+        order_manager.submit_order = original_submit
+
+    @pytest.mark.asyncio
+    async def test_sell_order_persisted_to_database(
+        self, mock_db, mock_clob_client, position_tracker, balance_manager, order_manager
+    ):
+        """
+        CRITICAL: SELL orders must be persisted to the orders table.
+        This is what was missing before the fix.
+        """
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+            balance_manager=balance_manager,
+            order_manager=order_manager,
+            min_hold_days=7,
+        )
+
+        position = Position(
+            position_id="pos_persist_test",
+            token_id="tok_persist",
+            condition_id="0xpersist",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+        position_tracker.positions[position.position_id] = position
+
+        # Reset mock to track calls
+        mock_db.execute.reset_mock()
+
+        await manager.execute_exit(
+            position,
+            current_price=Decimal("0.98"),
+            reason="profit_target",
+        )
+
+        # Verify INSERT INTO orders was called (order persistence)
+        insert_calls = [
+            call for call in mock_db.execute.call_args_list
+            if call[0] and "INSERT INTO orders" in str(call[0][0])
+        ]
+        assert len(insert_calls) >= 1, "SELL order should be persisted to orders table"
+
+    @pytest.mark.asyncio
+    async def test_legacy_fallback_without_order_manager(
+        self, mock_db, mock_clob_client, position_tracker, balance_manager
+    ):
+        """
+        When order_manager is NOT provided, should fall back to direct CLOB call.
+        This maintains backward compatibility but logs a warning.
+        """
+        # Create manager WITHOUT order_manager
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+            balance_manager=balance_manager,
+            order_manager=None,  # No order manager
+            min_hold_days=7,
+        )
+
+        position = Position(
+            position_id="pos_legacy",
+            token_id="tok_legacy",
+            condition_id="0xlegacy",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+        position_tracker.positions[position.position_id] = position
+
+        # Should still work via direct CLOB call
+        success, order_id = await manager.execute_exit(
+            position,
+            current_price=Decimal("0.98"),
+            reason="profit_target",
+        )
+
+        # Direct CLOB call should have been made
+        mock_clob_client.create_and_post_order.assert_called()
+        assert success is True
+
+    @pytest.mark.asyncio
+    async def test_full_exit_flow_creates_exit_event(
+        self, mock_db, mock_clob_client, position_tracker, balance_manager, order_manager
+    ):
+        """
+        Full exit flow should create both:
+        1. An order record (via order_manager)
+        2. An exit_event record (via position_tracker)
+
+        This is what populates the equity curve.
+        """
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+            balance_manager=balance_manager,
+            order_manager=order_manager,
+            min_hold_days=7,
+        )
+
+        position = Position(
+            position_id="pos_full_flow",
+            token_id="tok_full",
+            condition_id="0xfull",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+        position_tracker.positions[position.position_id] = position
+
+        success, order_id = await manager.execute_exit(
+            position,
+            current_price=Decimal("0.98"),
+            reason="profit_target",
+        )
+
+        assert success is True
+        assert order_id is not None
+
+        # Verify exit_event was created
+        exit_events = position_tracker.get_exit_events(position.position_id)
+        assert len(exit_events) == 1
+        assert exit_events[0].reason == "profit_target"
+        assert exit_events[0].exit_price == Decimal("0.98")
+
+    @pytest.mark.asyncio
+    async def test_regression_equity_curve_bug_scenario(
+        self, mock_db, mock_clob_client, position_tracker, balance_manager, order_manager
+    ):
+        """
+        Regression test for the exact bug scenario:
+        - User clicks "close position" in dashboard
+        - SELL order is submitted
+        - Order should be saved to DB (was missing before fix)
+        - exit_event should be created (for equity curve)
+
+        Before the fix:
+        - SELL went to CLOB directly
+        - No order record
+        - No exit_event (equity curve stuck at 1 point)
+        """
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+            balance_manager=balance_manager,
+            order_manager=order_manager,
+            min_hold_days=7,
+        )
+
+        # Simulate the position that wouldn't close properly
+        position = Position(
+            position_id="pos_equity_bug",
+            token_id="tok_equity",
+            condition_id="0xequity",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+        position_tracker.positions[position.position_id] = position
+
+        # Track all DB operations
+        mock_db.execute.reset_mock()
+
+        # Simulate dashboard close action
+        success, order_id = await manager.execute_exit(
+            position,
+            current_price=Decimal("0.98"),
+            reason="manual_close",  # Dashboard reason
+        )
+
+        # MUST succeed
+        assert success is True, "Exit should succeed"
+
+        # MUST have order_id
+        assert order_id is not None, "Order ID should be returned"
+
+        # MUST have persisted order to database
+        insert_order_calls = [
+            call for call in mock_db.execute.call_args_list
+            if call[0] and "INSERT INTO orders" in str(call[0][0])
+        ]
+        assert len(insert_order_calls) >= 1, (
+            "BUG REGRESSION: SELL order was not persisted to database. "
+            "This causes equity curve to not update."
+        )
+
+        # MUST have exit_event for equity curve
+        exit_events = position_tracker.get_exit_events(position.position_id)
+        assert len(exit_events) == 1, (
+            "BUG REGRESSION: exit_event was not created. "
+            "Equity curve will not show this closed position."
+        )
+
+    @pytest.mark.asyncio
+    async def test_sell_order_has_correct_side_in_database(
+        self, mock_db, mock_clob_client, position_tracker, balance_manager, order_manager
+    ):
+        """
+        Verify the persisted order has side='SELL', not 'BUY'.
+        """
+        manager = ExitManager(
+            db=mock_db,
+            clob_client=mock_clob_client,
+            position_tracker=position_tracker,
+            balance_manager=balance_manager,
+            order_manager=order_manager,
+            min_hold_days=7,
+        )
+
+        position = Position(
+            position_id="pos_side_test",
+            token_id="tok_side",
+            condition_id="0xside",
+            size=Decimal("20"),
+            entry_price=Decimal("0.95"),
+            entry_cost=Decimal("19.00"),
+            entry_time=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+        position_tracker.positions[position.position_id] = position
+
+        mock_db.execute.reset_mock()
+
+        await manager.execute_exit(
+            position,
+            current_price=Decimal("0.98"),
+            reason="profit_target",
+        )
+
+        # Find the INSERT call and verify side is SELL
+        for call in mock_db.execute.call_args_list:
+            if call[0] and "INSERT INTO orders" in str(call[0][0]):
+                # Args are: order_id, token_id, condition_id, side, ...
+                side_arg = call[0][4] if len(call[0]) > 4 else None
+                assert side_arg == "SELL", f"Order side should be SELL, got {side_arg}"
+                break

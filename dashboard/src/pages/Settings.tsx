@@ -231,7 +231,10 @@ export function Settings() {
           </div>
 
           <div className="flex items-center gap-2 text-sm">
-            <div className={`w-2 h-2 rounded-full ${apiKey ? 'bg-positive' : 'bg-text-muted'}`} />
+            <div
+              className={`w-2 h-2 rounded-full ${apiKey ? 'bg-positive' : 'bg-text-muted'}`}
+              aria-hidden="true"
+            />
             <span className="text-text-secondary">Status:</span>
             <span className="text-text-primary font-medium">{apiKeyStatus}</span>
           </div>

@@ -239,16 +239,20 @@ export function Markets() {
             </div>
             {isLoading && <span className="text-xs text-text-secondary">Refreshing...</span>}
           </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+          {/* Horizontal scroll wrapper for mobile */}
+          <div className="overflow-x-auto -webkit-overflow-scrolling-touch">
+            <table className="w-full min-w-[700px] text-sm" aria-label="Markets list">
+              <caption className="sr-only">
+                Available markets showing market question, category, bid price, ask price, spread, and volume
+              </caption>
               <thead className="bg-bg-tertiary text-text-secondary text-xs uppercase tracking-widest">
                 <tr>
-                  <th className="px-4 py-3 text-left">Market</th>
-                  <th className="px-4 py-3 text-left">Category</th>
-                  <th className="px-4 py-3 text-right">Bid</th>
-                  <th className="px-4 py-3 text-right">Ask</th>
-                  <th className="px-4 py-3 text-right">Spread</th>
-                  <th className="px-4 py-3 text-right">Volume</th>
+                  <th scope="col" className="px-4 py-3 text-left">Market</th>
+                  <th scope="col" className="px-4 py-3 text-left">Category</th>
+                  <th scope="col" className="px-4 py-3 text-right">Bid</th>
+                  <th scope="col" className="px-4 py-3 text-right">Ask</th>
+                  <th scope="col" className="px-4 py-3 text-right">Spread</th>
+                  <th scope="col" className="px-4 py-3 text-right">Volume</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
@@ -375,9 +379,9 @@ export function Markets() {
                 </div>
               </div>
 
-              {tokens.length > 0 && (
-                <div className="border-t border-border pt-3 space-y-2">
-                  <div className="text-xs uppercase tracking-[0.3em] text-text-secondary/70">Token</div>
+              <div className="border-t border-border pt-3 space-y-2">
+                <div className="text-xs uppercase tracking-[0.3em] text-text-secondary/70">Token</div>
+                {tokens.length > 0 ? (
                   <select
                     value={selectedTokenId ?? ''}
                     onChange={(event) => setSelectedTokenId(event.target.value)}
@@ -389,8 +393,12 @@ export function Markets() {
                       </option>
                     ))}
                   </select>
-                </div>
-              )}
+                ) : (
+                  <div className="text-xs text-accent-red bg-accent-red/10 border border-accent-red/30 rounded-lg p-2">
+                    Token data unavailable. Backend may need restart or market data not yet loaded.
+                  </div>
+                )}
+              </div>
 
               <div className="border-t border-border pt-3 space-y-2">
                 <div className="text-xs uppercase tracking-[0.3em] text-text-secondary/70">
@@ -592,10 +600,11 @@ export function Markets() {
                 {orderSuccess && <div className="text-xs text-accent-green">{orderSuccess}</div>}
                 <button
                   onClick={handleManualOrder}
-                  disabled={orderSubmitting}
+                  disabled={orderSubmitting || !selectedTokenId}
                   className="w-full rounded-full bg-accent-blue px-4 py-2 text-xs font-semibold text-white disabled:opacity-60"
+                  title={!selectedTokenId ? 'Select a token first' : undefined}
                 >
-                  {orderSubmitting ? 'Submitting...' : 'Submit Manual Order'}
+                  {orderSubmitting ? 'Submitting...' : !selectedTokenId ? 'Token Required' : 'Submit Manual Order'}
                 </button>
               </div>
 

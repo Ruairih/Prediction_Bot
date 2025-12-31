@@ -788,13 +788,20 @@ class Dashboard:
                 return jsonify({"markets": [], "error": "Database not configured"})
 
             try:
-                limit = request.args.get("limit", 200, type=int)
+                limit = min(max(request.args.get("limit", 200, type=int), 1), 1000)
                 category = request.args.get("category", type=str)
                 search = request.args.get("q", type=str)
+                # Require minimum 3 chars for search to avoid expensive full-table scans
+                if search and len(search) < 3:
+                    search = None
+                sort = request.args.get("sort", "volume", type=str)
+                valid_sorts = {"volume", "liquidity", "price", "price_asc", "end_time", "spread", "updated"}
+                if sort not in valid_sorts:
+                    return jsonify({"error": f"Invalid sort. Valid options: {', '.join(sorted(valid_sorts))}"}), 400
                 result = dashboard._run_async(
-                    dashboard._get_markets(limit=limit, category=category, search=search)
+                    dashboard._get_markets(limit=limit, category=category, search=search, sort=sort)
                 )
-                return jsonify({"markets": result})
+                return jsonify({"markets": result, "sort": sort, "limit": limit})
             except Exception as e:
                 logger.error(f"Failed to get markets: {e}")
                 return jsonify({"markets": [], "error": str(e)}), 500
@@ -1442,34 +1449,47 @@ class Dashboard:
         limit: int = 200,
         category: Optional[str] = None,
         search: Optional[str] = None,
+        sort: str = "volume",
     ) -> List[Dict[str, Any]]:
-        """Get market universe snapshot from stream_watchlist."""
+        """Get market universe snapshot from explorer_markets."""
         if not self._db:
             return []
 
-        filters: List[str] = []
+        filters: List[str] = ["active = true"]
         params: List[Any] = []
 
         if category and category.lower() != "all":
             params.append(category)
-            filters.append(f"category = ${len(params)}")
+            filters.append(f"LOWER(category) = LOWER(${len(params)})")
 
         if search:
             params.append(f"%{search}%")
             filters.append(
-                f"(question ILIKE ${len(params)} OR slug ILIKE ${len(params)})"
+                f"(question ILIKE ${len(params)} OR market_slug ILIKE ${len(params)})"
             )
 
-        where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+        where_clause = f"WHERE {' AND '.join(filters)}"
         params.append(limit)
+
+        # Sort options
+        sort_clauses = {
+            "volume": "volume DESC NULLS LAST",
+            "liquidity": "liquidity DESC NULLS LAST",
+            "price": "yes_price DESC NULLS LAST",
+            "price_asc": "yes_price ASC NULLS LAST",
+            "end_time": "end_time ASC NULLS LAST",
+            "spread": "spread ASC NULLS LAST",
+            "updated": "updated_at DESC NULLS LAST",
+        }
+        order_by = sort_clauses.get(sort, sort_clauses["volume"])
 
         query = f"""
             SELECT market_id, condition_id, question, category,
                    best_bid, best_ask, liquidity, volume,
-                   end_date, generated_at
-            FROM stream_watchlist
+                   end_time, updated_at, yes_price, spread
+            FROM explorer_markets
             {where_clause}
-            ORDER BY volume DESC NULLS LAST
+            ORDER BY {order_by}
             LIMIT ${len(params)}
         """
 
@@ -1485,8 +1505,10 @@ class Dashboard:
                 "best_ask": float(r["best_ask"]) if r.get("best_ask") is not None else None,
                 "liquidity": float(r["liquidity"]) if r.get("liquidity") is not None else None,
                 "volume": float(r["volume"]) if r.get("volume") is not None else None,
-                "end_date": r.get("end_date"),
-                "generated_at": r.get("generated_at"),
+                "end_date": r.get("end_time"),
+                "generated_at": r.get("updated_at"),
+                "yes_price": float(r["yes_price"]) if r.get("yes_price") is not None else None,
+                "spread": float(r["spread"]) if r.get("spread") is not None else None,
             }
             for r in records
         ]
@@ -1498,12 +1520,14 @@ class Dashboard:
 
         orders: List[Dict[str, Any]] = []
 
-        # Execution-layer orders table
+        # Execution-layer orders table - join with explorer_markets for question
         exec_query = """
-            SELECT order_id, token_id, condition_id, side, price, size,
-                   filled_size, avg_fill_price, status, created_at, updated_at
-            FROM orders
-            ORDER BY created_at DESC
+            SELECT o.order_id, o.token_id, o.condition_id, o.side, o.price, o.size,
+                   o.filled_size, o.avg_fill_price, o.status, o.created_at, o.updated_at,
+                   m.question
+            FROM orders o
+            LEFT JOIN explorer_markets m ON o.condition_id = m.condition_id
+            ORDER BY o.created_at DESC
             LIMIT $1
         """
         try:
@@ -1515,6 +1539,7 @@ class Dashboard:
                 "order_id": r["order_id"],
                 "token_id": r["token_id"],
                 "condition_id": r["condition_id"],
+                "question": r.get("question"),
                 "side": r.get("side"),
                 "order_price": float(r["price"]),
                 "order_size": float(r["size"]),
@@ -1525,12 +1550,14 @@ class Dashboard:
                 "filled_at": self._format_timestamp(r["updated_at"]) if r.get("updated_at") else None,
             })
 
-        # Legacy live_orders table (if present)
+        # Legacy live_orders table (if present) - join with explorer_markets for question
         live_query = """
-            SELECT order_id, token_id, condition_id, order_price, order_size,
-                   fill_price, fill_size, status, submitted_at, filled_at
-            FROM live_orders
-            ORDER BY submitted_at DESC
+            SELECT lo.order_id, lo.token_id, lo.condition_id, lo.order_price, lo.order_size,
+                   lo.fill_price, lo.fill_size, lo.status, lo.submitted_at, lo.filled_at,
+                   m.question
+            FROM live_orders lo
+            LEFT JOIN explorer_markets m ON lo.condition_id = m.condition_id
+            ORDER BY lo.submitted_at DESC
             LIMIT $1
         """
         try:
@@ -1542,6 +1569,7 @@ class Dashboard:
                 "order_id": r.get("order_id"),
                 "token_id": r["token_id"],
                 "condition_id": r["condition_id"],
+                "question": r.get("question"),
                 "side": None,
                 "order_price": float(r["order_price"]) if r.get("order_price") is not None else None,
                 "order_size": float(r["order_size"]) if r.get("order_size") is not None else None,
@@ -1922,7 +1950,7 @@ class Dashboard:
                 "id": f"order-{row['order_id']}",
                 "type": event_type,
                 "timestamp": self._format_timestamp(ts_value),
-                "summary": f"{status.capitalize()}: {question} | {row.get('side', '')} {size:.0f if size else ''} @ {price:.3f if price else ''}".strip(),
+                "summary": f"{status.capitalize()}: {question} | {row.get('side', '')} {f'{size:.0f}' if size else ''} @ {f'{price:.3f}' if price else ''}".strip(),
                 "details": {
                     "order_id": row["order_id"],
                     "token_id": row["token_id"],
@@ -2548,6 +2576,82 @@ class Dashboard:
             for r in token_rows
         ]
 
+        # Fallback: If polymarket_token_meta is empty, try market_universe.outcomes
+        if not tokens:
+            universe_row = await self._db.fetchrow(
+                "SELECT outcomes FROM market_universe WHERE condition_id = $1",
+                condition_id,
+            )
+            if universe_row and universe_row.get("outcomes"):
+                import json
+                outcomes_data = universe_row["outcomes"]
+                # Handle both string and already-parsed JSON
+                if isinstance(outcomes_data, str):
+                    try:
+                        outcomes_data = json.loads(outcomes_data)
+                    except json.JSONDecodeError:
+                        outcomes_data = []
+                if isinstance(outcomes_data, list):
+                    tokens = [
+                        {
+                            "token_id": o.get("token_id"),
+                            "outcome": o.get("outcome"),
+                            "outcome_index": o.get("outcome_index"),
+                        }
+                        for o in outcomes_data
+                        if o.get("token_id")
+                    ]
+
+        # Fallback 2: Fetch directly from Polymarket API if no tokens in database
+        if not tokens:
+            logger.info(f"No tokens in DB for {condition_id[:20]}..., trying Polymarket API fallback")
+            try:
+                import aiohttp
+                async with aiohttp.ClientSession() as session:
+                    # Use the markets list endpoint with condition_id filter
+                    api_url = f"https://gamma-api.polymarket.com/markets?condition_id={condition_id}"
+                    async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                        logger.info(f"Polymarket API response status: {resp.status}")
+                        if resp.status == 200:
+                            import json as json_mod
+                            markets_data = await resp.json()
+                            # API returns a list, get the first match
+                            market_data = markets_data[0] if markets_data else None
+                            if market_data:
+                                clob_token_ids_raw = market_data.get("clobTokenIds")
+                                outcomes_raw = market_data.get("outcomes")
+                                logger.info(f"Raw clobTokenIds: {clob_token_ids_raw}, outcomes: {outcomes_raw}")
+
+                                # Parse JSON strings if needed
+                                clob_token_ids = []
+                                outcomes_list = []
+                                if clob_token_ids_raw:
+                                    if isinstance(clob_token_ids_raw, str):
+                                        clob_token_ids = json_mod.loads(clob_token_ids_raw)
+                                    else:
+                                        clob_token_ids = clob_token_ids_raw
+                                if outcomes_raw:
+                                    if isinstance(outcomes_raw, str):
+                                        outcomes_list = json_mod.loads(outcomes_raw)
+                                    else:
+                                        outcomes_list = outcomes_raw
+
+                                # Build tokens from parsed data
+                                for i, token_id in enumerate(clob_token_ids):
+                                    outcome_name = outcomes_list[i] if i < len(outcomes_list) else ("Yes" if i == 0 else "No")
+                                    tokens.append({
+                                        "token_id": token_id,
+                                        "outcome": outcome_name,
+                                        "outcome_index": i,
+                                    })
+                                logger.info(f"Fetched {len(tokens)} tokens from Polymarket API for {condition_id[:20]}...")
+                            else:
+                                logger.warning(f"No market data in API response for {condition_id[:20]}...")
+                        else:
+                            logger.warning(f"Polymarket API returned status {resp.status} for {condition_id[:20]}...")
+            except Exception as e:
+                logger.error(f"Failed to fetch tokens from Polymarket API: {e}", exc_info=True)
+
         best_bid = float(record["best_bid"]) if record and record.get("best_bid") is not None else None
         best_ask = float(record["best_ask"]) if record and record.get("best_ask") is not None else None
         mid_price = (best_bid + best_ask) / 2 if best_bid is not None and best_ask is not None else best_bid or best_ask
@@ -2997,6 +3101,209 @@ class Dashboard:
                 "token_id": r.get("token_id"),
                 "reason": r.get("reason"),
                 "created_at": r.get("created_at"),
+            }
+            for r in records
+        ]
+
+    async def _get_pipeline_stats(self, minutes: int = 60) -> Dict[str, Any]:
+        """Get pipeline statistics for the given time window."""
+        if not self._db:
+            return {}
+
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+
+        # Get trigger counts
+        trigger_count = await self._db.fetchval(
+            "SELECT COUNT(*) FROM polymarket_first_triggers WHERE created_at > $1",
+            cutoff
+        ) or 0
+
+        # Get candidate counts by status
+        candidate_stats = await self._db.fetch(
+            """SELECT status, COUNT(*) as count
+               FROM polymarket_candidates
+               WHERE created_at > $1
+               GROUP BY status""",
+            cutoff
+        )
+
+        # Get rejection counts
+        rejection_count = await self._db.fetchval(
+            "SELECT COALESCE(SUM(count), 0) FROM pipeline_rejection_stats WHERE bucket_start > $1",
+            cutoff
+        ) or 0
+
+        return {
+            "triggers": trigger_count,
+            "candidates": {r["status"]: r["count"] for r in candidate_stats},
+            "rejections": rejection_count,
+            "window_minutes": minutes,
+        }
+
+    async def _get_pipeline_funnel(self, minutes: int = 60) -> List[Dict[str, Any]]:
+        """Get pipeline funnel data showing counts at each stage."""
+        if not self._db:
+            return []
+
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+
+        # Define pipeline stages
+        stages = []
+
+        # Stage 1: Market updates received (from explorer_markets as proxy)
+        market_count = await self._db.fetchval(
+            "SELECT COUNT(*) FROM explorer_markets WHERE active = true"
+        ) or 0
+        stages.append({"stage": "markets", "label": "Active Markets", "count": market_count})
+
+        # Stage 2: Price triggers
+        trigger_count = await self._db.fetchval(
+            "SELECT COUNT(*) FROM polymarket_first_triggers WHERE created_at > $1",
+            cutoff
+        ) or 0
+        stages.append({"stage": "triggers", "label": "Price Triggers", "count": trigger_count})
+
+        # Stage 3: Candidates generated
+        candidate_count = await self._db.fetchval(
+            "SELECT COUNT(*) FROM polymarket_candidates WHERE created_at > $1",
+            cutoff
+        ) or 0
+        stages.append({"stage": "candidates", "label": "Candidates", "count": candidate_count})
+
+        # Stage 4: Rejections by stage
+        rejection_stages = await self._db.fetch(
+            """SELECT stage, COALESCE(SUM(count), 0) as count
+               FROM pipeline_rejection_stats
+               WHERE bucket_start > $1
+               GROUP BY stage
+               ORDER BY count DESC""",
+            cutoff
+        )
+        for r in rejection_stages:
+            stages.append({
+                "stage": f"rejected_{r['stage']}",
+                "label": f"Rejected: {r['stage']}",
+                "count": r["count"]
+            })
+
+        return stages
+
+    async def _get_pipeline_rejections(
+        self, limit: int = 50, stage: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Get recent pipeline rejections."""
+        if not self._db:
+            return []
+
+        if stage:
+            query = """
+                SELECT id, bucket_start, stage, count, sample_token_id,
+                       sample_condition_id, sample_price, sample_question,
+                       sample_rejection_values, created_at
+                FROM pipeline_rejection_stats
+                WHERE stage = $1
+                ORDER BY bucket_start DESC
+                LIMIT $2
+            """
+            records = await self._db.fetch(query, stage, limit)
+        else:
+            query = """
+                SELECT id, bucket_start, stage, count, sample_token_id,
+                       sample_condition_id, sample_price, sample_question,
+                       sample_rejection_values, created_at
+                FROM pipeline_rejection_stats
+                ORDER BY bucket_start DESC
+                LIMIT $1
+            """
+            records = await self._db.fetch(query, limit)
+
+        return [
+            {
+                "id": r["id"],
+                "timestamp": self._format_timestamp(r["bucket_start"]),
+                "stage": r["stage"],
+                "count": r["count"],
+                "token_id": r.get("sample_token_id"),
+                "condition_id": r.get("sample_condition_id"),
+                "price": float(r["sample_price"]) if r.get("sample_price") else None,
+                "question": r.get("sample_question"),
+                "rejection_values": r.get("sample_rejection_values"),
+            }
+            for r in records
+        ]
+
+    async def _get_pipeline_candidates(
+        self, limit: int = 50, sort_by: str = "score"
+    ) -> List[Dict[str, Any]]:
+        """Get pipeline candidates."""
+        if not self._db:
+            return []
+
+        order_col = "score" if sort_by == "score" else "created_at"
+        query = f"""
+            SELECT c.id, c.token_id, c.condition_id, c.threshold, c.price,
+                   c.status, c.score, c.model_score, c.created_at, c.updated_at,
+                   m.question, m.category
+            FROM polymarket_candidates c
+            LEFT JOIN explorer_markets m ON c.condition_id = m.condition_id
+            ORDER BY c.{order_col} DESC NULLS LAST
+            LIMIT $1
+        """
+        records = await self._db.fetch(query, limit)
+
+        return [
+            {
+                "id": r["id"],
+                "token_id": r["token_id"],
+                "condition_id": r["condition_id"],
+                "threshold": float(r["threshold"]) if r.get("threshold") else None,
+                "price": float(r["price"]) if r.get("price") else None,
+                "status": r["status"],
+                "score": float(r["score"]) if r.get("score") else None,
+                "model_score": float(r["model_score"]) if r.get("model_score") else None,
+                "question": r.get("question"),
+                "category": r.get("category"),
+                "created_at": self._format_timestamp(r["created_at"]),
+                "updated_at": self._format_timestamp(r["updated_at"]) if r.get("updated_at") else None,
+            }
+            for r in records
+        ]
+
+    async def _get_near_misses(self, max_distance: float = 0.05) -> List[Dict[str, Any]]:
+        """Get markets that are close to the trigger threshold but haven't triggered."""
+        if not self._db:
+            return []
+
+        # Get current threshold from config or use default
+        threshold = 0.95
+
+        query = """
+            SELECT m.condition_id, m.market_id, m.question, m.category,
+                   m.yes_price, m.best_bid, m.best_ask, m.volume, m.liquidity
+            FROM explorer_markets m
+            LEFT JOIN polymarket_first_triggers t ON m.condition_id = t.condition_id
+            WHERE m.active = true
+              AND m.yes_price IS NOT NULL
+              AND m.yes_price >= $1
+              AND m.yes_price < $2
+              AND t.condition_id IS NULL
+            ORDER BY m.yes_price DESC
+            LIMIT 50
+        """
+        records = await self._db.fetch(query, threshold - max_distance, threshold)
+
+        return [
+            {
+                "condition_id": r["condition_id"],
+                "market_id": r["market_id"],
+                "question": r["question"],
+                "category": r.get("category"),
+                "price": float(r["yes_price"]) if r.get("yes_price") else None,
+                "distance": round(threshold - float(r["yes_price"]), 4) if r.get("yes_price") else None,
+                "best_bid": float(r["best_bid"]) if r.get("best_bid") else None,
+                "best_ask": float(r["best_ask"]) if r.get("best_ask") else None,
+                "volume": float(r["volume"]) if r.get("volume") else None,
+                "liquidity": float(r["liquidity"]) if r.get("liquidity") else None,
             }
             for r in records
         ]
